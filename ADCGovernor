@@ -1,0 +1,116 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.23;
+
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/token/ERC721/IERC721Upgradeable.sol";
+
+contract ADCGovernor is Initializable, UUPSUpgradeable, OwnableUpgradeable, ReentrancyGuardUpgradeable {
+    IERC20Upgradeable public adcToken;
+    IERC721Upgradeable public prestigeNFT;
+
+    uint256 public proposalCount;
+    uint256 public votingDuration; // in seconds
+
+    struct Proposal {
+        address proposer;
+        address target;
+        bytes callData;
+        uint256 votesFor;
+        uint256 votesAgainst;
+        uint256 startTime;
+        bool executed;
+    }
+
+    mapping(uint256 => Proposal) public proposals;
+    mapping(uint256 => mapping(address => bool)) public hasVoted;
+
+    event ProposalCreated(uint256 indexed proposalId, address indexed proposer, address target, bytes callData);
+    event Voted(address indexed voter, uint256 indexed proposalId, bool support, uint256 weight);
+    event ProposalExecuted(uint256 indexed proposalId);
+
+    function initialize(
+        address _adcToken,
+        address _prestigeNFT,
+        uint256 _votingDuration,
+        address _owner
+    ) public initializer {
+        __Ownable_init(_owner);
+        __UUPSUpgradeable_init();
+        __ReentrancyGuard_init();
+
+        adcToken = IERC20Upgradeable(_adcToken);
+        prestigeNFT = IERC721Upgradeable(_prestigeNFT);
+        votingDuration = _votingDuration;
+    }
+
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+
+    function createProposal(address target, bytes calldata callData) external returns (uint256 proposalId) {
+        proposalId = proposalCount++;
+        proposals[proposalId] = Proposal({
+            proposer: msg.sender,
+            target: target,
+            callData: callData,
+            votesFor: 0,
+            votesAgainst: 0,
+            startTime: block.timestamp,
+            executed: false
+        });
+
+        emit ProposalCreated(proposalId, msg.sender, target, callData);
+    }
+
+    function vote(uint256 proposalId, bool support) external {
+        Proposal storage prop = proposals[proposalId];
+        require(block.timestamp < prop.startTime + votingDuration, "Voting period ended");
+        require(!hasVoted[proposalId][msg.sender], "Already voted");
+
+        uint256 weight = adcToken.balanceOf(msg.sender);
+        uint256 nftBoost = prestigeNFT.balanceOf(msg.sender) * 500; // +5% per NFT
+        if (nftBoost > 2500) nftBoost = 2500; // cap at +25%
+
+        uint256 boostedWeight = weight + (weight * nftBoost) / 10000;
+
+        if (support) {
+            prop.votesFor += boostedWeight;
+        } else {
+            prop.votesAgainst += boostedWeight;
+        }
+
+        hasVoted[proposalId][msg.sender] = true;
+
+        emit Voted(msg.sender, proposalId, support, boostedWeight);
+    }
+
+    function executeProposal(uint256 proposalId) external nonReentrant {
+        Proposal storage prop = proposals[proposalId];
+        require(block.timestamp >= prop.startTime + votingDuration, "Voting not ended");
+        require(!prop.executed, "Already executed");
+        require(prop.votesFor > prop.votesAgainst, "Proposal rejected");
+
+        (bool success, ) = prop.target.call(prop.callData);
+        require(success, "Call failed");
+
+        prop.executed = true;
+        emit ProposalExecuted(proposalId);
+    }
+
+    function isProposalApproved(address caller) external view returns (bool) {
+        // Simplified authorization check for treasury calls:
+        // Only allow if latest proposal by caller was approved & executed
+        if (proposalCount == 0) return false;
+
+        for (uint256 i = proposalCount - 1; i >= 0; i--) {
+            Proposal storage prop = proposals[i];
+            if (prop.proposer == caller && prop.executed && prop.votesFor > prop.votesAgainst) {
+                return true;
+            }
+            if (i == 0) break;
+        }
+        return false;
+    }
+}
