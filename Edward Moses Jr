@@ -16,9 +16,27 @@ contract ADCDEX is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeable
     uint256 public totalLPTokens;
     mapping(address => uint256) public lpBalances;
 
+    uint256 public slippageTolerance;
+
+    struct RebalanceProposal {
+        uint256 targetADC;
+        uint256 targetStable;
+        uint256 votesFor;
+        uint256 votesAgainst;
+        uint256 deadline;
+        bool executed;
+    }
+
+    RebalanceProposal public proposal;
+    uint256 public proposalDuration;
+
     event LiquidityAdded(address indexed provider, uint256 adcAmount, uint256 stableAmount, uint256 lpTokensMinted);
     event LiquidityRemoved(address indexed provider, uint256 adcAmount, uint256 stableAmount, uint256 lpTokensBurned);
     event Swapped(address indexed user, address inputToken, uint256 inputAmount, address outputToken, uint256 outputAmount);
+    event SlippageUpdated(uint256 newTolerance);
+    event RebalanceProposed(uint256 targetADC, uint256 targetStable, uint256 deadline);
+    event Voted(address voter, bool support, uint256 weight);
+    event RebalanceExecuted(uint256 targetADC, uint256 targetStable);
 
     function initialize(address _adcToken, address _stableToken, address _owner) public initializer {
         __Ownable_init(_owner);
@@ -27,9 +45,75 @@ contract ADCDEX is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeable
 
         adcToken = IERC20Upgradeable(_adcToken);
         stableToken = IERC20Upgradeable(_stableToken);
+        slippageTolerance = 100;
+        proposalDuration = 3 days;
     }
 
     function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+
+    function proposeRebalance(uint256 targetADC, uint256 targetStable) external {
+        require(targetADC > 0 && targetStable > 0, "Invalid targets");
+        require(proposal.deadline < block.timestamp, "Active proposal exists");
+
+        proposal = RebalanceProposal({
+            targetADC: targetADC,
+            targetStable: targetStable,
+            votesFor: 0,
+            votesAgainst: 0,
+            deadline: block.timestamp + proposalDuration,
+            executed: false
+        });
+
+        emit RebalanceProposed(targetADC, targetStable, proposal.deadline);
+    }
+
+    function vote(bool support) external {
+        uint256 weight = adcToken.balanceOf(msg.sender);
+        require(weight > 0, "No voting power");
+        require(block.timestamp < proposal.deadline, "Voting closed");
+
+        if (support) {
+            proposal.votesFor += weight;
+        } else {
+            proposal.votesAgainst += weight;
+        }
+
+        emit Voted(msg.sender, support, weight);
+    }
+
+    function executeRebalance() external nonReentrant {
+        require(block.timestamp >= proposal.deadline, "Voting not ended");
+        require(!proposal.executed, "Already executed");
+        require(proposal.votesFor > proposal.votesAgainst, "Proposal rejected");
+
+        uint256 totalValue = adcReserve + stableReserve;
+        uint256 targetADCRatio = (proposal.targetADC * 1e18) / totalValue;
+        uint256 currentADCRatio = (adcReserve * 1e18) / totalValue;
+
+        if (currentADCRatio > targetADCRatio) {
+            uint256 excessADC = ((currentADCRatio - targetADCRatio) * totalValue) / 1e18;
+            uint256 adcAmountWithFee = excessADC * 997 / 1000;
+            uint256 stableOut = (adcAmountWithFee * stableReserve) / (adcReserve + adcAmountWithFee);
+
+            require(stableOut > (excessADC * (10000 - slippageTolerance)) / 10000, "Slippage too high");
+
+            adcReserve += excessADC;
+            stableReserve -= stableOut;
+
+        } else {
+            uint256 excessStable = ((targetADCRatio - currentADCRatio) * totalValue) / 1e18;
+            uint256 stableAmountWithFee = excessStable * 997 / 1000;
+            uint256 adcOut = (stableAmountWithFee * adcReserve) / (stableReserve + stableAmountWithFee);
+
+            require(adcOut > (excessStable * (10000 - slippageTolerance)) / 10000, "Slippage too high");
+
+            stableReserve += excessStable;
+            adcReserve -= adcOut;
+        }
+
+        proposal.executed = true;
+        emit RebalanceExecuted(proposal.targetADC, proposal.targetStable);
+    }
 
     function addLiquidity(uint256 adcAmount, uint256 stableAmount) external nonReentrant returns (uint256 lpTokensMinted) {
         require(adcAmount > 0 && stableAmount > 0, "Invalid amounts");
@@ -40,10 +124,7 @@ contract ADCDEX is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeable
         if (totalLPTokens == 0) {
             lpTokensMinted = sqrt(adcAmount * stableAmount);
         } else {
-            lpTokensMinted = min(
-                (adcAmount * totalLPTokens) / adcReserve,
-                (stableAmount * totalLPTokens) / stableReserve
-            );
+            lpTokensMinted = min((adcAmount * totalLPTokens) / adcReserve, (stableAmount * totalLPTokens) / stableReserve);
         }
 
         require(lpTokensMinted > 0, "Insufficient liquidity minted");
