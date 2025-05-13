@@ -1,0 +1,89 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.23;
+
+import "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+
+contract BondingMechanism is Initializable, UUPSUpgradeable, OwnableUpgradeable {
+    IERC20Upgradeable public adcToken;
+    address public treasury;
+
+    struct Bond {
+        uint256 amountADC;
+        uint256 vestingEnd;
+        uint256 claimed;
+    }
+
+    uint256 public vestingDuration; // e.g., 7 days
+    uint256 public discountBps; // e.g., 500 = 5% discount
+
+    mapping(address => Bond[]) public userBonds;
+
+    event BondCreated(address indexed user, uint256 indexed bondId, uint256 adcAmount, uint256 vestingEnd);
+    event BondClaimed(address indexed user, uint256 indexed bondId, uint256 claimedAmount);
+
+    function initialize(address _adcToken, address _treasury, uint256 _vestingDuration, uint256 _discountBps, address _owner) public initializer {
+        __Ownable_init(_owner);
+        __UUPSUpgradeable_init();
+
+        adcToken = IERC20Upgradeable(_adcToken);
+        treasury = _treasury;
+        vestingDuration = _vestingDuration;
+        discountBps = _discountBps;
+    }
+
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+
+    function bondAsset(address token, uint256 amount) external {
+        require(amount > 0, "Invalid amount");
+
+        IERC20Upgradeable(token).transferFrom(msg.sender, treasury, amount);
+
+        uint256 adcOut = getDiscountedADC(amount, token);
+
+        Bond memory newBond = Bond({
+            amountADC: adcOut,
+            vestingEnd: block.timestamp + vestingDuration,
+            claimed: 0
+        });
+
+        userBonds[msg.sender].push(newBond);
+
+        emit BondCreated(msg.sender, userBonds[msg.sender].length - 1, adcOut, newBond.vestingEnd);
+    }
+
+    function claim(uint256 bondId) external {
+        Bond storage bond = userBonds[msg.sender][bondId];
+        require(block.timestamp >= bond.vestingEnd, "Bond still vesting");
+        require(bond.claimed < bond.amountADC, "Already claimed");
+
+        uint256 claimable = bond.amountADC - bond.claimed;
+        bond.claimed = bond.amountADC;
+
+        adcToken.transfer(msg.sender, claimable);
+
+        emit BondClaimed(msg.sender, bondId, claimable);
+    }
+
+    function getDiscountedADC(uint256 assetAmount, address /* assetToken */) public view returns (uint256) {
+        uint256 adcAmount = assetAmount * (10000 + discountBps) / 10000;
+        return adcAmount;
+    }
+
+    function userBondCount(address user) external view returns (uint256) {
+        return userBonds[user].length;
+    }
+
+    function setDiscountBps(uint256 _discountBps) external onlyOwner {
+        require(_discountBps <= 2000, "Too high"); // Max 20%
+        discountBps = _discountBps;
+    }
+
+    function setVestingDuration(uint256 _vestingDuration) external onlyOwner {
+        require(_vestingDuration >= 1 days, "Too short");
+        vestingDuration = _vestingDuration;
+    }
+}
+
