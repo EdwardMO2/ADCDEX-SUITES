@@ -1,0 +1,93 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.23;
+
+import "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+
+interface IveADC {
+    function getVotingPower(uint256 tokenId) external view returns (uint256);
+    function totalVotingPower() external view returns (uint256);
+    function ownerOf(uint256 tokenId) external view returns (address);
+}
+
+interface IBribeMarket {
+    function getPoolVoteWeight(address pool) external view returns (uint256);
+}
+
+interface IStakingRewards {
+    function notifyRewardAmount(address pool, uint256 amount) external;
+}
+
+contract EmissionsController is Initializable, UUPSUpgradeable, OwnableUpgradeable {
+    IERC20Upgradeable public adcToken;
+    IveADC public veADC;
+    IBribeMarket public bribeMarket;
+    IStakingRewards public stakingRewards;
+
+    uint256 public epochDuration;
+    uint256 public lastEpochTime;
+    uint256 public emissionPerEpoch;
+
+    event EmissionsDistributed(address indexed pool, uint256 amount, uint256 epoch);
+
+    function initialize(
+        address _adcToken,
+        address _veADC,
+        address _bribeMarket,
+        address _stakingRewards,
+        uint256 _epochDuration,
+        uint256 _emissionPerEpoch,
+        address _owner
+    ) public initializer {
+        __Ownable_init(_owner);
+        __UUPSUpgradeable_init();
+
+        adcToken = IERC20Upgradeable(_adcToken);
+        veADC = IveADC(_veADC);
+        bribeMarket = IBribeMarket(_bribeMarket);
+        stakingRewards = IStakingRewards(_stakingRewards);
+
+        epochDuration = _epochDuration;
+        emissionPerEpoch = _emissionPerEpoch;
+        lastEpochTime = block.timestamp;
+    }
+
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+
+    function distributeEmissions(address[] calldata pools) external {
+        require(block.timestamp >= lastEpochTime + epochDuration, "Epoch not ended");
+
+        uint256 totalVotes = veADC.totalVotingPower();
+        require(totalVotes > 0, "No veADC votes");
+
+        uint256 totalDistributed = 0;
+
+        for (uint256 i = 0; i < pools.length; i++) {
+            uint256 poolVotes = bribeMarket.getPoolVoteWeight(pools[i]);
+            if (poolVotes == 0) continue;
+
+            uint256 poolReward = (emissionPerEpoch * poolVotes) / totalVotes;
+            if (poolReward == 0) continue;
+
+            adcToken.transfer(address(stakingRewards), poolReward);
+            stakingRewards.notifyRewardAmount(pools[i], poolReward);
+
+            totalDistributed += poolReward;
+            emit EmissionsDistributed(pools[i], poolReward, block.timestamp / epochDuration);
+        }
+
+        lastEpochTime = block.timestamp;
+
+        require(totalDistributed <= emissionPerEpoch, "Overallocated emissions");
+    }
+
+    function setEmissionPerEpoch(uint256 _amount) external onlyOwner {
+        emissionPerEpoch = _amount;
+    }
+
+    function setEpochDuration(uint256 _duration) external onlyOwner {
+        epochDuration = _duration;
+    }
+}
