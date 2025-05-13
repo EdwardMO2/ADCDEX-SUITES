@@ -1,0 +1,79 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.23;
+
+import "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+
+contract BondingTreasury is Initializable, UUPSUpgradeable, OwnableUpgradeable {
+    struct Asset {
+        uint256 totalReceived;
+        uint256 totalWithdrawn;
+        bool active;
+    }
+
+    mapping(address => Asset) public assets;
+    address[] public assetList;
+
+    event AssetDeposited(address indexed token, uint256 amount);
+    event AssetWithdrawn(address indexed token, uint256 amount, address to);
+    event AssetStatusUpdated(address indexed token, bool active);
+
+    function initialize(address _owner) public initializer {
+        __Ownable_init(_owner);
+        __UUPSUpgradeable_init();
+    }
+
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+
+    function deposit(address token, uint256 amount) external {
+        require(assets[token].active, "Asset not accepted");
+        require(amount > 0, "Invalid amount");
+
+        IERC20Upgradeable(token).transferFrom(msg.sender, address(this), amount);
+
+        assets[token].totalReceived += amount;
+
+        emit AssetDeposited(token, amount);
+    }
+
+    function withdraw(address token, uint256 amount, address to) external onlyOwner {
+        require(amount > 0, "Invalid amount");
+
+        IERC20Upgradeable(token).transfer(to, amount);
+
+        assets[token].totalWithdrawn += amount;
+
+        emit AssetWithdrawn(token, amount, to);
+    }
+
+    function addAsset(address token) external onlyOwner {
+        require(!assets[token].active, "Already active");
+        assets[token].active = true;
+        assetList.push(token);
+
+        emit AssetStatusUpdated(token, true);
+    }
+
+    function deactivateAsset(address token) external onlyOwner {
+        require(assets[token].active, "Already inactive");
+        assets[token].active = false;
+
+        emit AssetStatusUpdated(token, false);
+    }
+
+    function getAssetList() external view returns (address[] memory) {
+        return assetList;
+    }
+
+    function getPOLBalance(address token) external view returns (uint256 netBalance) {
+        uint256 received = assets[token].totalReceived;
+        uint256 withdrawn = assets[token].totalWithdrawn;
+        if (received >= withdrawn) {
+            netBalance = received - withdrawn;
+        } else {
+            netBalance = 0;
+        }
+    }
+}
