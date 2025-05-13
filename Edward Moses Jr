@@ -10,6 +10,7 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 contract ADCDEX is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeable, UUPSUpgradeable {
     IERC20Upgradeable public adcToken;
     IERC20Upgradeable public stableToken;
+    address public layerZeroEndpoint;
 
     uint256 public adcReserve;
     uint256 public stableReserve;
@@ -17,6 +18,7 @@ contract ADCDEX is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeable
     mapping(address => uint256) public lpBalances;
 
     uint256 public slippageTolerance;
+    uint256 public proposalDuration;
 
     struct RebalanceProposal {
         uint256 targetADC;
@@ -28,7 +30,6 @@ contract ADCDEX is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeable
     }
 
     RebalanceProposal public proposal;
-    uint256 public proposalDuration;
 
     event LiquidityAdded(address indexed provider, uint256 adcAmount, uint256 stableAmount, uint256 lpTokensMinted);
     event LiquidityRemoved(address indexed provider, uint256 adcAmount, uint256 stableAmount, uint256 lpTokensBurned);
@@ -45,11 +46,41 @@ contract ADCDEX is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeable
 
         adcToken = IERC20Upgradeable(_adcToken);
         stableToken = IERC20Upgradeable(_stableToken);
-        slippageTolerance = 100;
+        slippageTolerance = 100; // 1% slippage tolerance
         proposalDuration = 3 days;
     }
 
     function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+
+    function lzReceive(uint16 /*srcChainId*/, bytes calldata /*srcAddress*/, uint64 /*nonce*/, bytes calldata payload) external nonReentrant {
+        require(msg.sender == address(layerZeroEndpoint), "Invalid sender");
+
+        uint256 targetADC = abi.decode(payload, (uint256));
+
+        uint256 totalValue = adcReserve + stableReserve;
+        uint256 targetADCRatio = (targetADC * 1e18) / totalValue;
+        uint256 currentADCRatio = (adcReserve * 1e18) / totalValue;
+
+        if (currentADCRatio > targetADCRatio) {
+            uint256 excessADC = ((currentADCRatio - targetADCRatio) * totalValue) / 1e18;
+            uint256 adcAmountWithFee = excessADC * 997 / 1000;
+            uint256 stableOut = (adcAmountWithFee * stableReserve) / (adcReserve + adcAmountWithFee);
+
+            require(stableOut > (excessADC * (10000 - slippageTolerance)) / 10000, "Slippage too high");
+
+            adcReserve += excessADC;
+            stableReserve -= stableOut;
+        } else {
+            uint256 excessStable = ((targetADCRatio - currentADCRatio) * totalValue) / 1e18;
+            uint256 stableAmountWithFee = excessStable * 997 / 1000;
+            uint256 adcOut = (stableAmountWithFee * adcReserve) / (stableReserve + stableAmountWithFee);
+
+            require(adcOut > (excessStable * (10000 - slippageTolerance)) / 10000, "Slippage too high");
+
+            stableReserve += excessStable;
+            adcReserve -= adcOut;
+        }
+    }
 
     function proposeRebalance(uint256 targetADC, uint256 targetStable) external {
         require(targetADC > 0 && targetStable > 0, "Invalid targets");
@@ -99,7 +130,6 @@ contract ADCDEX is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeable
 
             adcReserve += excessADC;
             stableReserve -= stableOut;
-
         } else {
             uint256 excessStable = ((targetADCRatio - currentADCRatio) * totalValue) / 1e18;
             uint256 stableAmountWithFee = excessStable * 997 / 1000;
