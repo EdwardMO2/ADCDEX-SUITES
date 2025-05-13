@@ -1,0 +1,61 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.23;
+
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
+
+interface IFlashLoanReceiver {
+    function executeOperation(address token, uint256 amount, uint256 fee, bytes calldata data) external;
+}
+
+contract ADCFlashLoanVault is Initializable, UUPSUpgradeable, OwnableUpgradeable, ReentrancyGuardUpgradeable {
+    IERC20Upgradeable public lpToken;
+    uint256 public flashLoanFee; // in basis points (e.g., 30 = 0.3%)
+    address public treasury;
+
+    event FlashLoanExecuted(address indexed borrower, uint256 amount, uint256 fee);
+
+    function initialize(address _lpToken, address _treasury, uint256 _feeBps, address _owner) public initializer {
+        __Ownable_init(_owner);
+        __UUPSUpgradeable_init();
+        __ReentrancyGuard_init();
+
+        lpToken = IERC20Upgradeable(_lpToken);
+        treasury = _treasury;
+        flashLoanFee = _feeBps;
+    }
+
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+
+    function flashLoan(address receiver, uint256 amount, bytes calldata data) external nonReentrant {
+        require(amount > 0 && amount <= lpToken.balanceOf(address(this)), "Invalid loan amount");
+
+        uint256 fee = (amount * flashLoanFee) / 10000;
+
+        uint256 initialBalance = lpToken.balanceOf(address(this));
+        lpToken.transfer(receiver, amount);
+
+        IFlashLoanReceiver(receiver).executeOperation(address(lpToken), amount, fee, data);
+
+        uint256 finalBalance = lpToken.balanceOf(address(this));
+        require(finalBalance >= initialBalance + fee, "Insufficient repayment + fee");
+
+        // Transfer fee to Treasury
+        lpToken.transfer(treasury, fee);
+
+        emit FlashLoanExecuted(receiver, amount, fee);
+    }
+
+    function setFlashLoanFee(uint256 _feeBps) external onlyOwner {
+        require(_feeBps <= 1000, "Max 10%");
+        flashLoanFee = _feeBps;
+    }
+
+    function setTreasury(address _treasury) external onlyOwner {
+        require(_treasury != address(0), "Invalid treasury");
+        treasury = _treasury;
+    }
+}
