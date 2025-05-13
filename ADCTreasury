@@ -1,0 +1,100 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.23;
+
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
+import "./ADCGovernor.sol";
+
+contract ADCTreasury is Initializable, UUPSUpgradeable, OwnableUpgradeable, ReentrancyGuardUpgradeable {
+    IERC20Upgradeable public adcToken;
+    IERC20Upgradeable public usdcToken;
+    ADCGovernor public governor;
+
+    uint256 public buybackRate; // percentage of fees used for ADC buybacks (e.g., 5000 = 50%)
+    uint256 public daoBudget; // funds allocated for DAO-approved spending
+    uint256 public reserves; // treasury reserves held in USDC
+
+    event FeesCollected(uint256 amount);
+    event BuybackExecuted(uint256 usdcSpent, uint256 adcBurned);
+    event DAOAllocated(uint256 amount);
+    event TreasuryFunded(uint256 amount);
+
+    function initialize(
+        address _adcToken,
+        address _usdcToken,
+        address _governor,
+        address _owner
+    ) public initializer {
+        __Ownable_init(_owner);
+        __UUPSUpgradeable_init();
+        __ReentrancyGuard_init();
+
+        adcToken = IERC20Upgradeable(_adcToken);
+        usdcToken = IERC20Upgradeable(_usdcToken);
+        governor = ADCGovernor(_governor);
+
+        buybackRate = 5000; // default 50% of fees used for buybacks
+    }
+
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+
+    /// @notice Collect protocol fees (e.g., from ADCDEX)
+    function collectFees(uint256 amount) external nonReentrant {
+        require(amount > 0, "Invalid amount");
+        require(usdcToken.transferFrom(msg.sender, address(this), amount), "Fee transfer failed");
+
+        uint256 buybackPortion = (amount * buybackRate) / 10000;
+        uint256 daoPortion = amount - buybackPortion;
+
+        daoBudget += daoPortion;
+        reserves += buybackPortion;
+
+        emit FeesCollected(amount);
+    }
+
+    /// @notice Execute ADC token buyback and burn
+    function executeBuyback() external nonReentrant onlyOwner {
+        require(reserves > 0, "No reserves for buyback");
+
+        uint256 buybackAmount = reserves;
+        reserves = 0;
+
+        // Simple simulation: directly burn ADC from Treasury balance
+        // In production, you'd swap USDC -> ADC on DEX before burn
+        uint256 adcBalance = adcToken.balanceOf(address(this));
+        require(adcBalance >= buybackAmount, "Insufficient ADC to burn");
+
+        adcToken.transfer(address(0xdead), buybackAmount);
+
+        emit BuybackExecuted(buybackAmount, buybackAmount);
+    }
+
+    /// @notice DAO can allocate funds from treasury budget
+    function allocateDAOFunds(address recipient, uint256 amount) external nonReentrant {
+        require(governor.isProposalApproved(msg.sender), "Not authorized by DAO");
+        require(amount <= daoBudget, "Exceeds DAO budget");
+
+        daoBudget -= amount;
+        require(usdcToken.transfer(recipient, amount), "DAO allocation transfer failed");
+
+        emit DAOAllocated(amount);
+    }
+
+    /// @notice Fund treasury reserves manually (optional top-up)
+    function fundTreasury(uint256 amount) external nonReentrant {
+        require(amount > 0, "Invalid amount");
+        require(usdcToken.transferFrom(msg.sender, address(this), amount), "Treasury funding failed");
+
+        reserves += amount;
+
+        emit TreasuryFunded(amount);
+    }
+
+    function setBuybackRate(uint256 _rate) external onlyOwner {
+        require(_rate <= 10000, "Max 100%");
+        buybackRate = _rate;
+    }
+}
