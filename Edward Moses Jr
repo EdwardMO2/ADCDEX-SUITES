@@ -1,0 +1,168 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.23;
+
+import "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/token/ERC721/IERC721Upgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+
+contract ADCStakingRewards is Initializable, UUPSUpgradeable, OwnableUpgradeable, ReentrancyGuardUpgradeable {
+    IERC20Upgradeable public adcToken;
+    IERC20Upgradeable public lpToken;
+    IERC721Upgradeable public prestigeNFT;
+
+    uint256 public rewardRate; // ADC per second per LP token
+    uint256 public lockupDuration;
+    uint256 public earlyUnstakePenalty; // in basis points (e.g., 500 = 5%)
+
+    struct StakeInfo {
+        uint256 amount;
+        uint256 startTime;
+        uint256 rewardDebt;
+    }
+
+    mapping(address => StakeInfo) public stakes;
+    uint256 public accRewardPerShare;
+    uint256 public lastUpdateTime;
+    uint256 public totalStaked;
+
+    event Staked(address indexed user, uint256 amount);
+    event Unstaked(address indexed user, uint256 amount, uint256 reward, uint256 penalty);
+    event RewardClaimed(address indexed user, uint256 reward);
+
+    function initialize(
+        address _adcToken,
+        address _lpToken,
+        address _prestigeNFT,
+        uint256 _rewardRate,
+        uint256 _lockupDuration,
+        uint256 _earlyUnstakePenalty,
+        address _owner
+    ) public initializer {
+        __Ownable_init(_owner);
+        __ReentrancyGuard_init();
+        __UUPSUpgradeable_init();
+
+        adcToken = IERC20Upgradeable(_adcToken);
+        lpToken = IERC20Upgradeable(_lpToken);
+        prestigeNFT = IERC721Upgradeable(_prestigeNFT);
+
+        rewardRate = _rewardRate;
+        lockupDuration = _lockupDuration;
+        earlyUnstakePenalty = _earlyUnstakePenalty;
+        lastUpdateTime = block.timestamp;
+    }
+
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+
+    function updatePool() public {
+        if (totalStaked == 0) {
+            lastUpdateTime = block.timestamp;
+            return;
+        }
+
+        uint256 elapsed = block.timestamp - lastUpdateTime;
+        uint256 reward = elapsed * rewardRate;
+        accRewardPerShare += (reward * 1e18) / totalStaked;
+        lastUpdateTime = block.timestamp;
+    }
+
+    function stake(uint256 amount) external nonReentrant {
+        require(amount > 0, "Invalid amount");
+
+        updatePool();
+
+        StakeInfo storage userStake = stakes[msg.sender];
+        if (userStake.amount > 0) {
+            uint256 pending = (userStake.amount * accRewardPerShare) / 1e18 - userStake.rewardDebt;
+            if (pending > 0) {
+                _distributeReward(msg.sender, pending);
+            }
+        }
+
+        lpToken.transferFrom(msg.sender, address(this), amount);
+        userStake.amount += amount;
+        userStake.startTime = block.timestamp;
+        totalStaked += amount;
+
+        userStake.rewardDebt = (userStake.amount * accRewardPerShare) / 1e18;
+
+        emit Staked(msg.sender, amount);
+    }
+
+    function unstake(uint256 amount) external nonReentrant {
+        StakeInfo storage userStake = stakes[msg.sender];
+        require(userStake.amount >= amount && amount > 0, "Invalid unstake amount");
+
+        updatePool();
+
+        uint256 pending = (userStake.amount * accRewardPerShare) / 1e18 - userStake.rewardDebt;
+
+        uint256 penalty = 0;
+        if (block.timestamp < userStake.startTime + lockupDuration) {
+            penalty = (amount * earlyUnstakePenalty) / 10000;
+            adcToken.transfer(owner(), penalty); // Penalty goes to Treasury
+        }
+
+        userStake.amount -= amount;
+        totalStaked -= amount;
+
+        lpToken.transfer(msg.sender, amount);
+
+        if (pending > 0) {
+            _distributeReward(msg.sender, pending);
+        }
+
+        userStake.rewardDebt = (userStake.amount * accRewardPerShare) / 1e18;
+
+        emit Unstaked(msg.sender, amount, pending, penalty);
+    }
+
+    function claimRewards() external nonReentrant {
+        updatePool();
+
+        StakeInfo storage userStake = stakes[msg.sender];
+        uint256 pending = (userStake.amount * accRewardPerShare) / 1e18 - userStake.rewardDebt;
+
+        require(pending > 0, "No rewards");
+
+        userStake.rewardDebt = (userStake.amount * accRewardPerShare) / 1e18;
+
+        _distributeReward(msg.sender, pending);
+
+        emit RewardClaimed(msg.sender, pending);
+    }
+
+    function _distributeReward(address user, uint256 amount) internal {
+        uint256 boostedAmount = _applyNFTBoost(user, amount);
+        adcToken.transfer(user, boostedAmount);
+    }
+
+    function _applyNFTBoost(address user, uint256 baseReward) internal view returns (uint256) {
+        uint256 nftBalance = prestigeNFT.balanceOf(user);
+        if (nftBalance == 0) return baseReward;
+
+        // Simple boost model: 5% per NFT, capped at 25% boost
+        uint256 boostPercent = nftBalance * 500; // 500 = 5%
+        if (boostPercent > 2500) boostPercent = 2500;
+
+        uint256 boostedReward = baseReward + (baseReward * boostPercent) / 10000;
+        return boostedReward;
+    }
+
+    function setRewardRate(uint256 _rewardRate) external onlyOwner {
+        updatePool();
+        rewardRate = _rewardRate;
+    }
+
+    function setLockupDuration(uint256 _lockupDuration) external onlyOwner {
+        lockupDuration = _lockupDuration;
+    }
+
+    function setEarlyUnstakePenalty(uint256 _penalty) external onlyOwner {
+        require(_penalty <= 10000, "Max 100%");
+        earlyUnstakePenalty = _penalty;
+    }
+}
