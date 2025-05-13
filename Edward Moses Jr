@@ -1,0 +1,128 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.23;
+
+import "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+
+contract ADCDEX is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeable, UUPSUpgradeable {
+    IERC20Upgradeable public adcToken;
+    IERC20Upgradeable public stableToken;
+
+    uint256 public adcReserve;
+    uint256 public stableReserve;
+    uint256 public totalLPTokens;
+    mapping(address => uint256) public lpBalances;
+
+    event LiquidityAdded(address indexed provider, uint256 adcAmount, uint256 stableAmount, uint256 lpTokensMinted);
+    event LiquidityRemoved(address indexed provider, uint256 adcAmount, uint256 stableAmount, uint256 lpTokensBurned);
+    event Swapped(address indexed user, address inputToken, uint256 inputAmount, address outputToken, uint256 outputAmount);
+
+    function initialize(address _adcToken, address _stableToken, address _owner) public initializer {
+        __Ownable_init(_owner);
+        __ReentrancyGuard_init();
+        __UUPSUpgradeable_init();
+
+        adcToken = IERC20Upgradeable(_adcToken);
+        stableToken = IERC20Upgradeable(_stableToken);
+    }
+
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+
+    function addLiquidity(uint256 adcAmount, uint256 stableAmount) external nonReentrant returns (uint256 lpTokensMinted) {
+        require(adcAmount > 0 && stableAmount > 0, "Invalid amounts");
+
+        adcToken.transferFrom(msg.sender, address(this), adcAmount);
+        stableToken.transferFrom(msg.sender, address(this), stableAmount);
+
+        if (totalLPTokens == 0) {
+            lpTokensMinted = sqrt(adcAmount * stableAmount);
+        } else {
+            lpTokensMinted = min(
+                (adcAmount * totalLPTokens) / adcReserve,
+                (stableAmount * totalLPTokens) / stableReserve
+            );
+        }
+
+        require(lpTokensMinted > 0, "Insufficient liquidity minted");
+
+        lpBalances[msg.sender] += lpTokensMinted;
+        totalLPTokens += lpTokensMinted;
+
+        adcReserve += adcAmount;
+        stableReserve += stableAmount;
+
+        emit LiquidityAdded(msg.sender, adcAmount, stableAmount, lpTokensMinted);
+    }
+
+    function removeLiquidity(uint256 lpTokens) external nonReentrant returns (uint256 adcAmount, uint256 stableAmount) {
+        require(lpTokens > 0 && lpBalances[msg.sender] >= lpTokens, "Invalid LP token amount");
+
+        adcAmount = (lpTokens * adcReserve) / totalLPTokens;
+        stableAmount = (lpTokens * stableReserve) / totalLPTokens;
+
+        lpBalances[msg.sender] -= lpTokens;
+        totalLPTokens -= lpTokens;
+
+        adcReserve -= adcAmount;
+        stableReserve -= stableAmount;
+
+        adcToken.transfer(msg.sender, adcAmount);
+        stableToken.transfer(msg.sender, stableAmount);
+
+        emit LiquidityRemoved(msg.sender, adcAmount, stableAmount, lpTokens);
+    }
+
+    function swapADCForStable(uint256 adcAmount) external nonReentrant returns (uint256 stableAmount) {
+        require(adcAmount > 0, "Invalid ADC amount");
+
+        uint256 adcAmountWithFee = adcAmount * 997 / 1000;
+        stableAmount = (adcAmountWithFee * stableReserve) / (adcReserve + adcAmountWithFee);
+
+        require(stableAmount > 0, "Insufficient output amount");
+
+        adcToken.transferFrom(msg.sender, address(this), adcAmount);
+        stableToken.transfer(msg.sender, stableAmount);
+
+        adcReserve += adcAmount;
+        stableReserve -= stableAmount;
+
+        emit Swapped(msg.sender, address(adcToken), adcAmount, address(stableToken), stableAmount);
+    }
+
+    function swapStableForADC(uint256 stableAmount) external nonReentrant returns (uint256 adcAmount) {
+        require(stableAmount > 0, "Invalid stablecoin amount");
+
+        uint256 stableAmountWithFee = stableAmount * 997 / 1000;
+        adcAmount = (stableAmountWithFee * adcReserve) / (stableReserve + stableAmountWithFee);
+
+        require(adcAmount > 0, "Insufficient output amount");
+
+        stableToken.transferFrom(msg.sender, address(this), stableAmount);
+        adcToken.transfer(msg.sender, adcAmount);
+
+        stableReserve += stableAmount;
+        adcReserve -= adcAmount;
+
+        emit Swapped(msg.sender, address(stableToken), stableAmount, address(adcToken), adcAmount);
+    }
+
+    function sqrt(uint256 y) internal pure returns (uint256 z) {
+        if (y > 3) {
+            z = y;
+            uint256 x = y / 2 + 1;
+            while (x < z) {
+                z = x;
+                x = (y / x + x) / 2;
+            }
+        } else if (y != 0) {
+            z = 1;
+        }
+    }
+
+    function min(uint256 x, uint256 y) internal pure returns (uint256 z) {
+        z = x < y ? x : y;
+    }
+}
