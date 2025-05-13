@@ -1,0 +1,14 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.23;
+
+struct MessagingParams {
+    uint32 dstEid;
+    bytes32 to;
+    bytes message;
+    bytes options;
+}
+
+struct MessagingFee {
+    uint128 nativeFee;
+    uint128 lzTokenFee;
+}
