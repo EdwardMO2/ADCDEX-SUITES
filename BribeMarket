@@ -1,0 +1,64 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.23;
+
+import "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+
+interface IveADC {
+    function getVotingPower(uint256 tokenId) external view returns (uint256);
+    function totalVotingPower() external view returns (uint256);
+}
+
+contract BribeMarket is Initializable, UUPSUpgradeable, OwnableUpgradeable {
+    IERC20Upgradeable public rewardToken;
+    IveADC public veADC;
+
+    struct Bribe {
+        uint256 totalBribe;
+        mapping(uint256 => bool) claimed;
+    }
+
+    mapping(address => Bribe) public bribes; // pool => Bribe
+
+    event BribeAdded(address indexed pool, uint256 amount);
+    event BribeClaimed(address indexed user, uint256 tokenId, address pool, uint256 reward);
+
+    function initialize(address _veADC, address _rewardToken, address _owner) public initializer {
+        __Ownable_init(_owner);
+        __UUPSUpgradeable_init();
+
+        veADC = IveADC(_veADC);
+        rewardToken = IERC20Upgradeable(_rewardToken);
+    }
+
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+
+    function addBribe(address pool, uint256 amount) external {
+        require(amount > 0, "Invalid amount");
+        rewardToken.transferFrom(msg.sender, address(this), amount);
+        bribes[pool].totalBribe += amount;
+
+        emit BribeAdded(pool, amount);
+    }
+
+    function claimBribe(address pool, uint256 tokenId) external {
+        require(veADC.getVotingPower(tokenId) > 0, "No voting power");
+
+        Bribe storage bribeInfo = bribes[pool];
+        require(!bribeInfo.claimed[tokenId], "Already claimed");
+
+        uint256 userPower = veADC.getVotingPower(tokenId);
+        uint256 totalPower = veADC.totalVotingPower();
+
+        require(totalPower > 0, "No total power");
+
+        uint256 reward = (bribeInfo.totalBribe * userPower) / totalPower;
+        bribeInfo.claimed[tokenId] = true;
+
+        rewardToken.transfer(msg.sender, reward);
+
+        emit BribeClaimed(msg.sender, tokenId, pool, reward);
+    }
+}
