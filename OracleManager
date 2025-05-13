@@ -1,0 +1,108 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.23;
+
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
+
+interface IADCDEX {
+    function getReserves() external view returns (uint256 adcReserve, uint256 stableReserve);
+}
+
+contract OracleManager is Initializable, UUPSUpgradeable, OwnableUpgradeable {
+    AggregatorV3Interface public chainlinkGoldFeed;
+    address public adcDexPool;
+    uint256 public twapWindow; // in seconds
+    uint256 public oracleStalenessThreshold; // in seconds
+
+    struct Observation {
+        uint256 timestamp;
+        uint256 price;
+    }
+
+    Observation[] public observations;
+
+    event PriceUpdated(uint256 price, uint256 timestamp);
+
+    function initialize(
+        address _chainlinkGoldFeed,
+        address _adcDexPool,
+        uint256 _twapWindow,
+        uint256 _oracleStalenessThreshold,
+        address _owner
+    ) public initializer {
+        __Ownable_init(_owner);
+        __UUPSUpgradeable_init();
+
+        chainlinkGoldFeed = AggregatorV3Interface(_chainlinkGoldFeed);
+        adcDexPool = _adcDexPool;
+        twapWindow = _twapWindow;
+        oracleStalenessThreshold = _oracleStalenessThreshold;
+    }
+
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+
+    function getLatestPrice() public view returns (uint256 price, bool isChainlinkValid) {
+        (, int256 chainlinkPrice, , uint256 updatedAt, ) = chainlinkGoldFeed.latestRoundData();
+        require(chainlinkPrice > 0, "Invalid Chainlink price");
+
+        isChainlinkValid = (block.timestamp <= updatedAt + oracleStalenessThreshold);
+        price = uint256(chainlinkPrice);
+    }
+
+    function updateTWAP() external {
+        (uint256 adcReserve, uint256 stableReserve) = IADCDEX(adcDexPool).getReserves();
+        require(adcReserve > 0 && stableReserve > 0, "Invalid reserves");
+
+        uint256 poolPrice = (stableReserve * 1e18) / adcReserve;
+
+        observations.push(Observation({
+            timestamp: block.timestamp,
+            price: poolPrice
+        }));
+
+        emit PriceUpdated(poolPrice, block.timestamp);
+
+        // Prune old observations outside TWAP window
+        uint256 cutoff = block.timestamp - twapWindow;
+        while (observations.length > 1 && observations[0].timestamp < cutoff) {
+            for (uint256 i = 0; i < observations.length - 1; i++) {
+                observations[i] = observations[i + 1];
+            }
+            observations.pop();
+        }
+    }
+
+    function getTWAP() public view returns (uint256 twapPrice) {
+        require(observations.length > 0, "No TWAP observations");
+
+        uint256 total = 0;
+        uint256 count = 0;
+
+        for (uint256 i = 0; i < observations.length; i++) {
+            total += observations[i].price;
+            count++;
+        }
+
+        twapPrice = total / count;
+    }
+
+    function getEffectivePrice() public view returns (uint256 effectivePrice) {
+        (uint256 chainlinkPrice, bool isChainlinkValid) = getLatestPrice();
+
+        if (isChainlinkValid) {
+            effectivePrice = chainlinkPrice * 16; // For example: 1 oz gold * 16 multiplier
+        } else {
+            effectivePrice = getTWAP();
+        }
+    }
+
+    function setTwapWindow(uint256 _twapWindow) external onlyOwner {
+        twapWindow = _twapWindow;
+    }
+
+    function setOracleStalenessThreshold(uint256 _threshold) external onlyOwner {
+        oracleStalenessThreshold = _threshold;
+    }
+}
