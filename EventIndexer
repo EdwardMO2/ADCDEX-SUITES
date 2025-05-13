@@ -1,0 +1,82 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.23;
+
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+
+contract EventIndexer is Initializable, UUPSUpgradeable, OwnableUpgradeable {
+    uint256 public swapCount;
+    uint256 public liquidityEventCount;
+    uint256 public governanceVoteCount;
+
+    event SwapIndexed(
+        uint256 indexed id,
+        address indexed user,
+        address inputToken,
+        address outputToken,
+        uint256 inputAmount,
+        uint256 outputAmount,
+        uint256 timestamp
+    );
+
+    event LiquidityEventIndexed(
+        uint256 indexed id,
+        address indexed user,
+        address tokenA,
+        address tokenB,
+        uint256 amountA,
+        uint256 amountB,
+        bool added,
+        uint256 timestamp
+    );
+
+    event GovernanceVoteIndexed(
+        uint256 indexed id,
+        address indexed voter,
+        uint256 proposalId,
+        bool support,
+        uint256 weight,
+        uint256 timestamp
+    );
+
+    function initialize(address _owner) public initializer {
+        __Ownable_init(_owner);
+        __UUPSUpgradeable_init();
+    }
+
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+
+    function indexSwap(
+        address user,
+        address inputToken,
+        address outputToken,
+        uint256 inputAmount,
+        uint256 outputAmount
+    ) external onlyOwner {
+        swapCount++;
+        emit SwapIndexed(swapCount, user, inputToken, outputToken, inputAmount, outputAmount, block.timestamp);
+    }
+
+    function indexLiquidityEvent(
+        address user,
+        address tokenA,
+        address tokenB,
+        uint256 amountA,
+        uint256 amountB,
+        bool added
+    ) external onlyOwner {
+        liquidityEventCount++;
+        emit LiquidityEventIndexed(liquidityEventCount, user, tokenA, tokenB, amountA, amountB, added, block.timestamp);
+    }
+
+    function indexGovernanceVote(
+        address voter,
+        uint256 proposalId,
+        bool support,
+        uint256 weight
+    ) external onlyOwner {
+        governanceVoteCount++;
+        emit GovernanceVoteIndexed(governanceVoteCount, voter, proposalId, support, weight, block.timestamp);
+    }
+}
