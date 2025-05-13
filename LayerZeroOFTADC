@@ -1,0 +1,74 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.23;
+
+import "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC20BurnableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+
+import "@layerzerolabs/lz-evm-protocol-v2/contracts/interfaces/ILayerZeroEndpointV2.sol";
+
+contract LayerZeroOFTADC is ERC20BurnableUpgradeable, UUPSUpgradeable, OwnableUpgradeable {
+    ILayerZeroEndpointV2 public layerZeroEndpoint;
+
+    mapping(uint32 => bytes32) public trustedRemotes;
+
+    function initialize(
+        string memory name,
+        string memory symbol,
+        address _layerZeroEndpoint,
+        address _owner
+    ) public initializer {
+        __ERC20_init(name, symbol);
+        __ERC20Burnable_init();
+        __Ownable_init(_owner);
+        __UUPSUpgradeable_init();
+
+        layerZeroEndpoint = ILayerZeroEndpointV2(_layerZeroEndpoint);
+    }
+
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+
+    function setTrustedRemote(uint32 remoteEid, bytes32 remoteAddress) external onlyOwner {
+        trustedRemotes[remoteEid] = remoteAddress;
+    }
+
+    function sendToChain(
+        uint32 dstEid,
+        bytes32 receiver,
+        uint256 amount,
+        bytes calldata options
+    ) external payable {
+        _burn(msg.sender, amount);
+
+        bytes memory payload = abi.encode(receiver, amount);
+
+        MessagingParams memory msgParams = MessagingParams({
+            dstEid: dstEid,
+            receiver: trustedRemotes[dstEid],
+            message: payload,
+            options: options,
+            payInLzToken: false
+        });
+
+        MessagingFee memory fee = layerZeroEndpoint.quote(msgParams, address(this));
+
+        require(msg.value >= fee.nativeFee, "Insufficient msg.value for LayerZero fees");
+
+        layerZeroEndpoint.send{value: msg.value}(msgParams, payable(msg.sender));
+    }
+
+    function lzReceive(
+        bytes calldata, // Removed _origin name
+        bytes calldata message,
+        address, // Removed _executor name
+        bytes calldata // Removed _extraData name
+    ) external {
+        require(msg.sender == address(layerZeroEndpoint), "Unauthorized LayerZero call");
+
+        (bytes32 toAddress, uint256 amount) = abi.decode(message, (bytes32, uint256));
+
+        address recipient = address(uint160(uint256(toAddress)));
+
+        _mint(recipient, amount);
+    }
+}
