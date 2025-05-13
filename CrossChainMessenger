@@ -1,0 +1,70 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.23;
+
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+
+interface IADCDEX {
+    function lzReceive(uint16 srcChainId, bytes calldata srcAddress, uint64 nonce, bytes calldata payload) external;
+    function syncMetadata(uint256 tokenId, string calldata uri) external;
+    function withdrawReward(address user) external;
+    function cancelLoan(uint256 loanId) external;
+}
+
+contract CrossChainMessenger is Initializable, UUPSUpgradeable, OwnableUpgradeable {
+    enum ActionType {
+        REBALANCE,
+        SYNC_METADATA,
+        WITHDRAW_REWARD,
+        CANCEL_LOAN
+    }
+
+    mapping(uint16 => bytes) public trustedRemotes;
+    address public immutable layerZeroEndpoint;
+
+    event MessageReceived(uint16 srcChainId, bytes srcAddress, ActionType action, bytes payload);
+    event TrustedRemoteSet(uint16 chainId, bytes remoteAddress);
+
+    constructor(address _lzEndpoint) {
+        require(_lzEndpoint != address(0), "Invalid endpoint");
+        layerZeroEndpoint = _lzEndpoint;
+        _disableInitializers();
+    }
+
+    function initialize(address _owner) public initializer {
+        __Ownable_init(_owner);
+        __UUPSUpgradeable_init();
+    }
+
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+
+    function setTrustedRemote(uint16 chainId, bytes calldata remoteAddress) external onlyOwner {
+        trustedRemotes[chainId] = remoteAddress;
+        emit TrustedRemoteSet(chainId, remoteAddress);
+    }
+
+    function lzReceive(uint16 srcChainId, bytes calldata srcAddress, uint64 nonce, bytes calldata payload) external {
+        require(msg.sender == layerZeroEndpoint, "Invalid sender");
+        require(keccak256(srcAddress) == keccak256(trustedRemotes[srcChainId]), "Untrusted remote");
+
+        (ActionType action, address targetContract, bytes memory innerPayload) = abi.decode(payload, (ActionType, address, bytes));
+
+        emit MessageReceived(srcChainId, srcAddress, action, innerPayload);
+
+        if (action == ActionType.REBALANCE) {
+            IADCDEX(targetContract).lzReceive(srcChainId, srcAddress, nonce, innerPayload);
+        } else if (action == ActionType.SYNC_METADATA) {
+            (uint256 tokenId, string memory uri) = abi.decode(innerPayload, (uint256, string));
+            IADCDEX(targetContract).syncMetadata(tokenId, uri);
+        } else if (action == ActionType.WITHDRAW_REWARD) {
+            (address user) = abi.decode(innerPayload, (address));
+            IADCDEX(targetContract).withdrawReward(user);
+        } else if (action == ActionType.CANCEL_LOAN) {
+            (uint256 loanId) = abi.decode(innerPayload, (uint256));
+            IADCDEX(targetContract).cancelLoan(loanId);
+        } else {
+            revert("Unknown action type");
+        }
+    }
+}
