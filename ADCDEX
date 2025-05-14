@@ -6,218 +6,263 @@ import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "../ADCGovernor.sol";
 
 contract ADCDEX is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeable, UUPSUpgradeable {
-    IERC20Upgradeable public adcToken;
-    IERC20Upgradeable public stableToken;
-    address public layerZeroEndpoint;
+    ADCGovernor public governor;
+    bool public paused;
 
-    uint256 public adcReserve;
-    uint256 public stableReserve;
-    uint256 public totalLPTokens;
-    mapping(address => uint256) public lpBalances;
+    struct PoolConfig {
+        IERC20Upgradeable token0;
+        IERC20Upgradeable token1;
+        uint256 feeBps;
+        bool isStable;
+    }
 
-    uint256 public slippageTolerance;
+    struct PoolState {
+        uint256 reserve0;
+        uint256 reserve1;
+        uint256 totalLPTokens;
+        mapping(address => uint256) lpBalances;
+    }
+
+    mapping(address => PoolConfig) public poolConfigs;
+    mapping(address => PoolState) private poolStates;
+    address[] public allPairs;
+
     uint256 public proposalDuration;
+    uint256 public minProposalThreshold;
+    address public timelock;
 
     struct RebalanceProposal {
-        uint256 targetADC;
-        uint256 targetStable;
+        address pair;
+        uint256 targetReserve0;
+        uint256 targetReserve1;
         uint256 votesFor;
         uint256 votesAgainst;
         uint256 deadline;
         bool executed;
     }
 
-    RebalanceProposal public proposal;
+    mapping(uint256 => RebalanceProposal) public proposals;
+    uint256 public proposalCount;
 
-    event LiquidityAdded(address indexed provider, uint256 adcAmount, uint256 stableAmount, uint256 lpTokensMinted);
-    event LiquidityRemoved(address indexed provider, uint256 adcAmount, uint256 stableAmount, uint256 lpTokensBurned);
-    event Swapped(address indexed user, address inputToken, uint256 inputAmount, address outputToken, uint256 outputAmount);
-    event SlippageUpdated(uint256 newTolerance);
-    event RebalanceProposed(uint256 targetADC, uint256 targetStable, uint256 deadline);
-    event Voted(address voter, bool support, uint256 weight);
-    event RebalanceExecuted(uint256 targetADC, uint256 targetStable);
+    event LiquidityAdded(address indexed pair, address indexed provider, uint256 amount0, uint256 amount1, uint256 lpTokens);
+    event LiquidityRemoved(address indexed pair, address indexed provider, uint256 amount0, uint256 amount1, uint256 lpTokens);
+    event Swapped(address indexed pair, address indexed user, address inputToken, uint256 inputAmount, uint256 outputAmount);
+    event FeeUpdated(address indexed pair, uint256 newFeeBps);
+    event RebalanceProposed(uint256 indexed proposalId, address pair, uint256 target0, uint256 target1, uint256 deadline);
+    event Paused(bool paused);
 
-    function initialize(address _adcToken, address _stableToken, address _owner) public initializer {
+    modifier whenNotPaused() {
+        require(!paused, "Contract paused");
+        _;
+    }
+
+    modifier validERC20(address token) {
+        require(token != address(0), "Zero address");
+        (bool success, ) = token.staticcall(abi.encodeWithSignature("totalSupply()"));
+        require(success, "Not ERC20-compatible");
+        _;
+    }
+
+    function initialize(address _governor, address _timelock, address _owner) public initializer {
         __Ownable_init(_owner);
         __ReentrancyGuard_init();
         __UUPSUpgradeable_init();
-
-        adcToken = IERC20Upgradeable(_adcToken);
-        stableToken = IERC20Upgradeable(_stableToken);
-        slippageTolerance = 100; // 1% slippage tolerance
+        governor = ADCGovernor(_governor);
+        timelock = _timelock;
         proposalDuration = 3 days;
+        minProposalThreshold = 1e18;
+        paused = false;
     }
 
-    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+    function _authorizeUpgrade(address /* newImplementation */) internal view override {
+        require(msg.sender == timelock, "Only timelock can upgrade");
+    }
 
-    function lzReceive(uint16 /*srcChainId*/, bytes calldata /*srcAddress*/, uint64 /*nonce*/, bytes calldata payload) external nonReentrant {
-        require(msg.sender == address(layerZeroEndpoint), "Invalid sender");
+    function pause(bool _paused) external {
+        require(msg.sender == timelock || governor.isProposalApproved(msg.sender), "Not authorized");
+        paused = _paused;
+        emit Paused(_paused);
+    }
 
-        uint256 targetADC = abi.decode(payload, (uint256));
+    function createPool(address tokenA, address tokenB, bool isStable, uint256 feeBps) 
+        external 
+        whenNotPaused 
+        validERC20(tokenA) 
+        validERC20(tokenB) 
+        returns (address pair) 
+    {
+        require(tokenA != tokenB, "Identical tokens");
+        require(feeBps >= 5 && feeBps <= 100, "Fee out of bounds");
 
-        uint256 totalValue = adcReserve + stableReserve;
-        uint256 targetADCRatio = (targetADC * 1e18) / totalValue;
-        uint256 currentADCRatio = (adcReserve * 1e18) / totalValue;
+        (address token0, address token1) = tokenA < tokenB ? (tokenA, tokenB) : (tokenB, tokenA);
+        pair = address(uint160(uint(keccak256(abi.encodePacked(token0, token1)))));
+        require(address(poolConfigs[pair].token0) == address(0), "Pool exists");
 
-        if (currentADCRatio > targetADCRatio) {
-            uint256 excessADC = ((currentADCRatio - targetADCRatio) * totalValue) / 1e18;
-            uint256 adcAmountWithFee = excessADC * 997 / 1000;
-            uint256 stableOut = (adcAmountWithFee * stableReserve) / (adcReserve + adcAmountWithFee);
+        poolConfigs[pair] = PoolConfig({
+            token0: IERC20Upgradeable(token0),
+            token1: IERC20Upgradeable(token1),
+            feeBps: feeBps,
+            isStable: isStable
+        });
 
-            require(stableOut > (excessADC * (10000 - slippageTolerance)) / 10000, "Slippage too high");
+        allPairs.push(pair);
+    }
 
-            adcReserve += excessADC;
-            stableReserve -= stableOut;
+    function addLiquidity(address pair, uint256 amount0, uint256 amount1) external nonReentrant whenNotPaused returns (uint256 lpTokensMinted) {
+        PoolConfig memory config = poolConfigs[pair];
+        PoolState storage state = poolStates[pair];
+        require(address(config.token0) != address(0), "Pool does not exist");
+        require(amount0 > 0 && amount1 > 0, "Zero amounts");
+
+        config.token0.transferFrom(msg.sender, address(this), amount0);
+        config.token1.transferFrom(msg.sender, address(this), amount1);
+
+        if (state.totalLPTokens == 0) {
+            lpTokensMinted = sqrt(amount0 * amount1);
         } else {
-            uint256 excessStable = ((targetADCRatio - currentADCRatio) * totalValue) / 1e18;
-            uint256 stableAmountWithFee = excessStable * 997 / 1000;
-            uint256 adcOut = (stableAmountWithFee * adcReserve) / (stableReserve + stableAmountWithFee);
-
-            require(adcOut > (excessStable * (10000 - slippageTolerance)) / 10000, "Slippage too high");
-
-            stableReserve += excessStable;
-            adcReserve -= adcOut;
+            lpTokensMinted = min((amount0 * state.totalLPTokens) / state.reserve0, (amount1 * state.totalLPTokens) / state.reserve1);
         }
+
+        require(lpTokensMinted > 0, "No LP tokens minted");
+
+        state.lpBalances[msg.sender] += lpTokensMinted;
+        state.totalLPTokens += lpTokensMinted;
+        state.reserve0 += amount0;
+        state.reserve1 += amount1;
+
+        emit LiquidityAdded(pair, msg.sender, amount0, amount1, lpTokensMinted);
     }
 
-    function proposeRebalance(uint256 targetADC, uint256 targetStable) external {
-        require(targetADC > 0 && targetStable > 0, "Invalid targets");
-        require(proposal.deadline < block.timestamp, "Active proposal exists");
+    function removeLiquidity(address pair, uint256 lpTokens) external nonReentrant whenNotPaused returns (uint256 amount0, uint256 amount1) {
+        PoolState storage state = poolStates[pair];
+        require(lpTokens > 0 && state.lpBalances[msg.sender] >= lpTokens, "Invalid LP amount");
 
-        proposal = RebalanceProposal({
-            targetADC: targetADC,
-            targetStable: targetStable,
+        amount0 = (lpTokens * state.reserve0) / state.totalLPTokens;
+        amount1 = (lpTokens * state.reserve1) / state.totalLPTokens;
+
+        state.lpBalances[msg.sender] -= lpTokens;
+        state.totalLPTokens -= lpTokens;
+        state.reserve0 -= amount0;
+        state.reserve1 -= amount1;
+
+        PoolConfig memory config = poolConfigs[pair];
+        config.token0.transfer(msg.sender, amount0);
+        config.token1.transfer(msg.sender, amount1);
+
+        emit LiquidityRemoved(pair, msg.sender, amount0, amount1, lpTokens);
+    }
+
+    function swap(address pair, address inputToken, uint256 inputAmount, uint256 minOutputAmount) external nonReentrant whenNotPaused returns (uint256 outputAmount) {
+        PoolConfig memory config = poolConfigs[pair];
+        PoolState storage state = poolStates[pair];
+
+        require(address(config.token0) != address(0), "Pool does not exist");
+        require(inputAmount > 0, "Zero input");
+
+        bool isToken0 = inputToken == address(config.token0);
+        (IERC20Upgradeable input, IERC20Upgradeable output, uint256 reserveIn, uint256 reserveOut) = isToken0
+            ? (config.token0, config.token1, state.reserve0, state.reserve1)
+            : (config.token1, config.token0, state.reserve1, state.reserve0);
+
+        input.transferFrom(msg.sender, address(this), inputAmount);
+
+        if (config.isStable) {
+            outputAmount = getStableSwapAmount(inputAmount, reserveIn, reserveOut, config.feeBps);
+        } else {
+            uint256 inputWithFee = inputAmount * (10000 - config.feeBps) / 10000;
+            outputAmount = (inputWithFee * reserveOut) / (reserveIn + inputWithFee);
+        }
+
+        require(outputAmount >= minOutputAmount, "Slippage too high");
+
+        output.transfer(msg.sender, outputAmount);
+
+        if (isToken0) {
+            state.reserve0 += inputAmount;
+            state.reserve1 -= outputAmount;
+        } else {
+            state.reserve1 += inputAmount;
+            state.reserve0 -= outputAmount;
+        }
+
+        emit Swapped(pair, msg.sender, inputToken, inputAmount, outputAmount);
+    }
+
+    function proposeRebalance(address pair, uint256 targetReserve0, uint256 targetReserve1) external whenNotPaused {
+        require(targetReserve0 > 0 && targetReserve1 > 0, "Invalid targets");
+        require(veADC(governor.veADCToken()).balanceOf(msg.sender) >= minProposalThreshold, "Insufficient veADC");
+        require(proposals[proposalCount].deadline < block.timestamp, "Active proposal exists");
+
+        proposals[proposalCount] = RebalanceProposal({
+            pair: pair,
+            targetReserve0: targetReserve0,
+            targetReserve1: targetReserve1,
             votesFor: 0,
             votesAgainst: 0,
             deadline: block.timestamp + proposalDuration,
             executed: false
         });
 
-        emit RebalanceProposed(targetADC, targetStable, proposal.deadline);
+        emit RebalanceProposed(proposalCount, pair, targetReserve0, targetReserve1, proposals[proposalCount].deadline);
+        proposalCount++;
     }
 
-    function vote(bool support) external {
-        uint256 weight = adcToken.balanceOf(msg.sender);
+    function vote(uint256 proposalId, bool support) external whenNotPaused {
+        uint256 weight = veADC(governor.veADCToken()).balanceOf(msg.sender);
         require(weight > 0, "No voting power");
-        require(block.timestamp < proposal.deadline, "Voting closed");
+        require(block.timestamp < proposals[proposalId].deadline, "Voting closed");
 
         if (support) {
-            proposal.votesFor += weight;
+            proposals[proposalId].votesFor += weight;
         } else {
-            proposal.votesAgainst += weight;
+            proposals[proposalId].votesAgainst += weight;
+        }
+    }
+
+    function executeRebalance(uint256 proposalId) external nonReentrant whenNotPaused {
+        RebalanceProposal storage prop = proposals[proposalId];
+        require(block.timestamp >= prop.deadline, "Voting not ended");
+        require(!prop.executed, "Already executed");
+        require(prop.votesFor > prop.votesAgainst, "Proposal rejected");
+
+        PoolState storage state = poolStates[prop.pair];
+        PoolConfig memory config = poolConfigs[prop.pair];
+
+        uint256 totalValue = state.reserve0 + state.reserve1;
+        uint256 targetRatio0 = (prop.targetReserve0 * 1e18) / totalValue;
+        uint256 currentRatio0 = (state.reserve0 * 1e18) / totalValue;
+
+        if (currentRatio0 > targetRatio0) {
+            uint256 excess0 = ((currentRatio0 - targetRatio0) * totalValue) / 1e18;
+            uint256 amountWithFee = excess0 * (10000 - config.feeBps) / 10000;
+            uint256 amountOut = (amountWithFee * state.reserve1) / (state.reserve0 + amountWithFee);
+            state.reserve0 += excess0;
+            state.reserve1 -= amountOut;
+        } else {
+            uint256 excess1 = ((targetRatio0 - currentRatio0) * totalValue) / 1e18;
+            uint256 amountWithFee = excess1 * (10000 - config.feeBps) / 10000;
+            uint256 amountOut = (amountWithFee * state.reserve0) / (state.reserve1 + amountWithFee);
+            state.reserve1 += excess1;
+            state.reserve0 -= amountOut;
         }
 
-        emit Voted(msg.sender, support, weight);
+        prop.executed = true;
     }
 
-    function executeRebalance() external nonReentrant {
-        require(block.timestamp >= proposal.deadline, "Voting not ended");
-        require(!proposal.executed, "Already executed");
-        require(proposal.votesFor > proposal.votesAgainst, "Proposal rejected");
-
-        uint256 totalValue = adcReserve + stableReserve;
-        uint256 targetADCRatio = (proposal.targetADC * 1e18) / totalValue;
-        uint256 currentADCRatio = (adcReserve * 1e18) / totalValue;
-
-        if (currentADCRatio > targetADCRatio) {
-            uint256 excessADC = ((currentADCRatio - targetADCRatio) * totalValue) / 1e18;
-            uint256 adcAmountWithFee = excessADC * 997 / 1000;
-            uint256 stableOut = (adcAmountWithFee * stableReserve) / (adcReserve + adcAmountWithFee);
-
-            require(stableOut > (excessADC * (10000 - slippageTolerance)) / 10000, "Slippage too high");
-
-            adcReserve += excessADC;
-            stableReserve -= stableOut;
-        } else {
-            uint256 excessStable = ((targetADCRatio - currentADCRatio) * totalValue) / 1e18;
-            uint256 stableAmountWithFee = excessStable * 997 / 1000;
-            uint256 adcOut = (stableAmountWithFee * adcReserve) / (stableReserve + stableAmountWithFee);
-
-            require(adcOut > (excessStable * (10000 - slippageTolerance)) / 10000, "Slippage too high");
-
-            stableReserve += excessStable;
-            adcReserve -= adcOut;
-        }
-
-        proposal.executed = true;
-        emit RebalanceExecuted(proposal.targetADC, proposal.targetStable);
+    function setFee(address pair, uint256 feeBps) external {
+        require(msg.sender == timelock || governor.isProposalApproved(msg.sender), "Not authorized");
+        require(feeBps >= 5 && feeBps <= 100, "Fee out of bounds");
+        poolConfigs[pair].feeBps = feeBps;
+        emit FeeUpdated(pair, feeBps);
     }
 
-    function addLiquidity(uint256 adcAmount, uint256 stableAmount) external nonReentrant returns (uint256 lpTokensMinted) {
-        require(adcAmount > 0 && stableAmount > 0, "Invalid amounts");
-
-        adcToken.transferFrom(msg.sender, address(this), adcAmount);
-        stableToken.transferFrom(msg.sender, address(this), stableAmount);
-
-        if (totalLPTokens == 0) {
-            lpTokensMinted = sqrt(adcAmount * stableAmount);
-        } else {
-            lpTokensMinted = min((adcAmount * totalLPTokens) / adcReserve, (stableAmount * totalLPTokens) / stableReserve);
-        }
-
-        require(lpTokensMinted > 0, "Insufficient liquidity minted");
-
-        lpBalances[msg.sender] += lpTokensMinted;
-        totalLPTokens += lpTokensMinted;
-
-        adcReserve += adcAmount;
-        stableReserve += stableAmount;
-
-        emit LiquidityAdded(msg.sender, adcAmount, stableAmount, lpTokensMinted);
-    }
-
-    function removeLiquidity(uint256 lpTokens) external nonReentrant returns (uint256 adcAmount, uint256 stableAmount) {
-        require(lpTokens > 0 && lpBalances[msg.sender] >= lpTokens, "Invalid LP token amount");
-
-        adcAmount = (lpTokens * adcReserve) / totalLPTokens;
-        stableAmount = (lpTokens * stableReserve) / totalLPTokens;
-
-        lpBalances[msg.sender] -= lpTokens;
-        totalLPTokens -= lpTokens;
-
-        adcReserve -= adcAmount;
-        stableReserve -= stableAmount;
-
-        adcToken.transfer(msg.sender, adcAmount);
-        stableToken.transfer(msg.sender, stableAmount);
-
-        emit LiquidityRemoved(msg.sender, adcAmount, stableAmount, lpTokens);
-    }
-
-    function swapADCForStable(uint256 adcAmount) external nonReentrant returns (uint256 stableAmount) {
-        require(adcAmount > 0, "Invalid ADC amount");
-
-        uint256 adcAmountWithFee = adcAmount * 997 / 1000;
-        stableAmount = (adcAmountWithFee * stableReserve) / (adcReserve + adcAmountWithFee);
-
-        require(stableAmount > 0, "Insufficient output amount");
-
-        adcToken.transferFrom(msg.sender, address(this), adcAmount);
-        stableToken.transfer(msg.sender, stableAmount);
-
-        adcReserve += adcAmount;
-        stableReserve -= stableAmount;
-
-        emit Swapped(msg.sender, address(adcToken), adcAmount, address(stableToken), stableAmount);
-    }
-
-    function swapStableForADC(uint256 stableAmount) external nonReentrant returns (uint256 adcAmount) {
-        require(stableAmount > 0, "Invalid stablecoin amount");
-
-        uint256 stableAmountWithFee = stableAmount * 997 / 1000;
-        adcAmount = (stableAmountWithFee * adcReserve) / (stableReserve + stableAmountWithFee);
-
-        require(adcAmount > 0, "Insufficient output amount");
-
-        stableToken.transferFrom(msg.sender, address(this), stableAmount);
-        adcToken.transfer(msg.sender, adcAmount);
-
-        stableReserve += stableAmount;
-        adcReserve -= adcAmount;
-
-        emit Swapped(msg.sender, address(stableToken), stableAmount, address(adcToken), adcAmount);
+    function getStableSwapAmount(uint256 inputAmount, uint256 reserveIn, uint256 reserveOut, uint256 feeBps) internal pure returns (uint256) {
+        uint256 inputWithFee = inputAmount * (10000 - feeBps) / 10000;
+        uint256 k = reserveIn * reserveOut;
+        return reserveOut - k / (reserveIn + inputWithFee);
     }
 
     function sqrt(uint256 y) internal pure returns (uint256 z) {
