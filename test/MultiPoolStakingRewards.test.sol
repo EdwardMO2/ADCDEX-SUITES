@@ -620,9 +620,9 @@ contract MultiPoolStakingRewardsTest {
 
         uint256 before = stakeToken.balanceOf(address(this));
         staking.unstake(0, 100 ether);
-        uint256 after_ = stakeToken.balanceOf(address(this));
+        uint256 balanceAfter = stakeToken.balanceOf(address(this));
 
-        TestAssert.assertEq(after_ - before, 100 ether, "full unstake amount");
+        TestAssert.assertEq(balanceAfter - before, 100 ether, "full unstake amount");
 
         MultiPoolStakingRewards.UserStakeInfo memory info =
             staking.getUserStakeInfo(address(this), 0);
@@ -677,8 +677,8 @@ contract MultiPoolStakingRewardsTest {
         // Unstake immediately (lockup has NOT elapsed).
         staking.unstake(0, stakeAmount);
 
-        uint256 after_ = stakeToken.balanceOf(address(this));
-        uint256 received = after_ - before;
+        uint256 balanceAfter = stakeToken.balanceOf(address(this));
+        uint256 received = balanceAfter - before;
 
         // Expected: 100 ether - 10% = 90 ether
         uint256 expectedOut = stakeAmount - (stakeAmount * PENALTY_BPS) / 10_000;
@@ -712,9 +712,9 @@ contract MultiPoolStakingRewardsTest {
 
         uint256 before = stakeToken.balanceOf(address(this));
         staking.unstake(0, stakeAmount);
-        uint256 after_ = stakeToken.balanceOf(address(this));
+        uint256 balanceAfter = stakeToken.balanceOf(address(this));
 
-        TestAssert.assertEq(after_ - before, stakeAmount, "full return without penalty");
+        TestAssert.assertEq(balanceAfter - before, stakeAmount, "full return without penalty");
         TestAssert.assertEq(staking.poolPenalties(0), 0, "no penalties");
     }
 
@@ -1107,9 +1107,9 @@ contract MultiPoolStakingRewardsTest {
 
         uint256 before = rewardToken.balanceOf(address(staking));
         staking.fundRewardPool(extra);
-        uint256 after_ = rewardToken.balanceOf(address(staking));
+        uint256 balanceAfter = rewardToken.balanceOf(address(staking));
 
-        TestAssert.assertEq(after_ - before, extra, "reward pool funded");
+        TestAssert.assertEq(balanceAfter - before, extra, "reward pool funded");
     }
 
     // -------------------------------------------------------------------------
