@@ -1,0 +1,115 @@
+name: Solidity CI/CD
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+
+permissions:
+  contents: read
+
+jobs:
+  validate-naming:
+    runs-on: ubuntu-latest
+    name: Branch Naming Check
+    steps:
+      - uses: actions/checkout@v3
+      - name: Validate branch naming convention
+        if: github.event_name == 'pull_request'
+        run: |
+          BRANCH_NAME="${{ github.head_ref }}"
+          if [[ "$BRANCH_NAME" =~ ^(feature|bugfix|hotfix|release|develop|main)/ ]]; then
+            echo "✓ Branch follows naming convention: $BRANCH_NAME"
+          else
+            echo "✗ Branch naming failed. Required: (feature|bugfix|hotfix|release|develop|main)/description"
+            exit 1
+          fi
+
+  solidity-validation:
+    runs-on: ubuntu-latest
+    name: Solidity Syntax Check
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install Solidity compiler
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq solc
+      - name: Validate all .sol files
+        run: |
+          FAILED=0
+          while IFS= read -r -d '' file; do
+            echo "Validating: $file"
+            if solc "$file" 2>&1 | grep -i "^Error:"; then
+              echo "✗ Syntax error in: $file"
+              FAILED=1
+            else
+              echo "✓ $file syntax OK"
+            fi
+          done < <(find . -name "*.sol" -type f -print0)
+          if [ "$FAILED" -eq 1 ]; then
+            echo "One or more Solidity files have syntax errors."
+            exit 1
+          fi
+
+  solhint-linting:
+    runs-on: ubuntu-latest
+    name: Solhint Linter
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      - name: Install solhint
+        run: npm install -g solhint
+      - name: Run Solhint linter
+        run: solhint '**/*.sol' --format stylish
+        continue-on-error: true
+
+  contract-compilation:
+    runs-on: ubuntu-latest
+    name: Contract Compilation
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      - name: Compile contracts
+        run: |
+          if [ -f "hardhat.config.js" ] || [ -f "hardhat.config.ts" ]; then
+            echo "Hardhat config detected — compiling with Hardhat"
+            npm install
+            npx hardhat compile
+          else
+            echo "No Hardhat config found — falling back to solc"
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq solc
+            mkdir -p build
+            FAILED=0
+            while IFS= read -r -d '' file; do
+              echo "Compiling: $file"
+              if solc --optimize --bin --abi "$file" -o build/ 2>&1; then
+                echo "✓ Compiled: $file"
+              else
+                echo "✗ Compilation failed: $file"
+                FAILED=1
+              fi
+            done < <(find contracts -name "*.sol" -type f -print0 2>/dev/null)
+            if [ "$FAILED" -eq 1 ]; then
+              echo "One or more contracts failed to compile."
+              exit 1
+            fi
+          fi
+      - name: Upload build artifacts
+        if: success()
+        uses: actions/upload-artifact@v3
+        with:
+          name: compiled-contracts
+          path: |
+            build/
+            artifacts/
+          if-no-files-found: ignore
