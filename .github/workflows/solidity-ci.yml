@@ -13,20 +13,23 @@ on:
 permissions:
   contents: read
 
+env:
+  SOLC_VERSION: "0.8.20"
+
 jobs:
   validate-naming:
     runs-on: ubuntu-latest
     name: Branch Naming Check
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Validate branch naming convention
         if: github.event_name == 'pull_request'
         run: |
           BRANCH_NAME="${{ github.head_ref }}"
-          if [[ "$BRANCH_NAME" =~ ^(feature|bugfix|hotfix|release|develop|main)/ ]]; then
+          if [[ "$BRANCH_NAME" =~ ^(feature|bugfix|hotfix|release|develop|main|copilot)/ ]]; then
             echo "✓ Branch follows naming convention: $BRANCH_NAME"
           else
-            echo "✗ Branch naming failed. Required: (feature|bugfix|hotfix|release|develop|main)/description"
+            echo "✗ Branch naming failed. Required: (feature|bugfix|hotfix|release|develop|main|copilot)/description"
             exit 1
           fi
 
@@ -34,13 +37,16 @@ jobs:
     runs-on: ubuntu-latest
     name: Solidity Syntax Check
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Install Solidity compiler
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq solc
+          pip3 install solc-select
+          solc-select install ${{ env.SOLC_VERSION }}
+          solc-select use ${{ env.SOLC_VERSION }}
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
       - name: Validate all .sol files
         run: |
+          export PATH="$HOME/.local/bin:$PATH"
           FAILED=0
           while IFS= read -r -d '' file; do
             echo "Validating: $file"
@@ -60,10 +66,10 @@ jobs:
     runs-on: ubuntu-latest
     name: Solhint Linter
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-node@v3
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '20'
       - name: Install solhint
         run: npm install -g solhint
       - name: Run Solhint linter
@@ -74,10 +80,10 @@ jobs:
     runs-on: ubuntu-latest
     name: Contract Compilation
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-node@v3
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '20'
       - name: Compile contracts
         run: |
           if [ -f "hardhat.config.js" ] || [ -f "hardhat.config.ts" ]; then
@@ -86,13 +92,15 @@ jobs:
             npx hardhat compile
           else
             echo "No Hardhat config found — falling back to solc"
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq solc
+            pip3 install solc-select
+            solc-select install ${{ env.SOLC_VERSION }}
+            solc-select use ${{ env.SOLC_VERSION }}
+            export PATH="$HOME/.local/bin:$PATH"
             mkdir -p build
             FAILED=0
             while IFS= read -r -d '' file; do
               echo "Compiling: $file"
-              if solc --optimize --bin --abi "$file" -o build/ 2>&1; then
+              if solc --optimize --bin --abi "$file" -o build/ --overwrite 2>&1; then
                 echo "✓ Compiled: $file"
               else
                 echo "✗ Compilation failed: $file"
@@ -106,7 +114,7 @@ jobs:
           fi
       - name: Upload build artifacts
         if: success()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: compiled-contracts
           path: |
