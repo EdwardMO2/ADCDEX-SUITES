@@ -1,6 +1,6 @@
 // Updated TimelockController-PATCHED.sol with corrected identifiers
 
-pragma solidity ^0.8.0;
+pragma solidity ^0.8.20;
 
 contract TimelockController {
     mapping(bytes32 => bool) public queuedTransactions;

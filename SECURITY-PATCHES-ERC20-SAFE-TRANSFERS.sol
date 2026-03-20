@@ -1,6 +1,6 @@
 // Updated BondingMechanismPatched contract in SECURITY-PATCHES-ERC20-SAFE-TRANSFERS.sol
 
-pragma solidity ^0.6.0;
+pragma solidity ^0.8.20;
 
 contract BondingMechanismPatched {
     // Declared variables
@@ -8,7 +8,7 @@ contract BondingMechanismPatched {
     uint256 public claimable;
 
     // Constructor to initialize variables
-    constructor(address _treasury, uint256 _claimable) public {
+    constructor(address _treasury, uint256 _claimable) {
         treasury = _treasury;
         claimable = _claimable;
     }
