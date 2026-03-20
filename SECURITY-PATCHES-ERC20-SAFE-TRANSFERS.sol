@@ -1,6 +1,6 @@
 // Updated BondingMechanismPatched contract in SECURITY-PATCHES-ERC20-SAFE-TRANSFERS.sol
 
-pragma solidity ^0.6.0;
+pragma solidity ^0.8.20;
 
 contract BondingMechanismPatched {
     // Declared variables
