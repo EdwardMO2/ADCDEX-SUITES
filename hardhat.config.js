@@ -1,6 +1,15 @@
-export default {
+require("@nomicfoundation/hardhat-toolbox");
+const { TASK_COMPILE_SOLIDITY_GET_SOURCE_PATHS } = require("hardhat/builtin-tasks/task-names");
+
+subtask(TASK_COMPILE_SOLIDITY_GET_SOURCE_PATHS).setAction(async (_, __, runSuper) => {
+    const paths = await runSuper();
+    return paths.filter((p) => !p.endsWith(".test.sol") && !p.includes("/tests/"));
+});
+
+/** @type import('hardhat/config').HardhatUserConfig */
+module.exports = {
     solidity: {
-        version: "0.8.23",
+        version: "0.8.20",
         settings: {
             optimizer: {
                 enabled: true,

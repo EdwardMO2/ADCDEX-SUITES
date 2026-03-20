@@ -1,36 +1,36 @@
-// Updated createPool function with return statements
-function createPool(...) {
-    // function logic...
-    return poolId; // Added missing return statement
-}
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
 
-// Updated removeLiquidity function with return statements
-function removeLiquidity(...) {
-    // function logic...
-    return removedAmount; // Added missing return statement
-}
+/// @title ADCDEX
+/// @notice Abstract base for the American Digital Coin DEX.
+///         Provides pool management, liquidity operations, swaps, and voting stubs.
+abstract contract ADCDEX {
+    mapping(address => bool) public hasVoted;
 
-// Updated swap function with return statements
-function swap(...) {
-    // function logic...
-    return swapResult; // Added missing return statement
-}
+    function createPool(
+        address baseToken,
+        address quoteToken,
+        uint256 fee
+    ) external virtual returns (bytes32 poolId);
 
-// Updated addLiquidity function with division by zero protection
-function addLiquidity(...) {
-    require(amount > 0, "Amount must be greater than zero.");
-    require(baseAmount > 0, "Base amount must be greater than zero.");
-    require(quoteAmount > 0, "Quote amount must be greater than zero.");
-    // protection against division by zero
-    require(baseAmount != 0 && quoteAmount != 0, "Division by zero error");
-    // function logic...
-}
+    function removeLiquidity(
+        bytes32 poolId,
+        uint256 lpAmount
+    ) external virtual returns (uint256 removedAmount);
 
-// Added hasVoted mapping to implement double-voting prevention
-mapping(address => bool) public hasVoted;
+    function swap(
+        bytes32 poolId,
+        address tokenIn,
+        uint256 amountIn,
+        uint256 minAmountOut
+    ) external virtual returns (uint256 swapResult);
 
-function vote(...) {
-    require(!hasVoted[msg.sender], "You have already voted."); // Prevention of double-voting
-    hasVoted[msg.sender] = true;
-    // function logic for voting...
+    function addLiquidity(
+        bytes32 poolId,
+        uint256 amount,
+        uint256 baseAmount,
+        uint256 quoteAmount
+    ) external virtual;
+
+    function vote(bytes32 proposalId) external virtual;
 }
