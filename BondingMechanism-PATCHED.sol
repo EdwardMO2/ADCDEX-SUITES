@@ -1,3 +1,4 @@
+pragma solidity ^0.8.20;
 // Updated getDiscountedADC function
 
 /**
