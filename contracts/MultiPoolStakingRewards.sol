@@ -101,7 +101,8 @@ contract MultiPoolStakingRewards is
         require(_rewardToken != address(0), "Invalid reward token");
         require(_owner != address(0), "Invalid owner");
 
-        __Ownable_init(_owner);
+        __Ownable_init();
+        _transferOwnership(_owner);
 
         rewardToken = IERC20(_rewardToken);
 
