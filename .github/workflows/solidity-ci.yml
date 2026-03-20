@@ -38,7 +38,7 @@ jobs:
     name: Solidity Syntax Check
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '20'
       - name: Install dependencies
@@ -72,7 +72,7 @@ jobs:
     name: Solhint Linter
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '20'
       - name: Install solhint
@@ -86,7 +86,7 @@ jobs:
     name: Contract Compilation
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '20'
       - name: Compile contracts
