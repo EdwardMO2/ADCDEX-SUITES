@@ -4,7 +4,7 @@
 **Auditor:** Automated Security Audit  
 **Scope:** All Solidity smart contracts in the ADCDEX-SUITES repository  
 **Solidity Version:** 0.8.20  
-**Framework:** Hardhat with OpenZeppelin 4.9.x
+**Framework:** Hardhat with OpenZeppelin ^4.9.0
 
 ---
 
@@ -268,7 +268,7 @@ This means the router acts as a simple transfer mechanism without actual AMM swa
 2. In the callback, deposit extra tokens from another source
 3. Satisfy the balance check without actually repaying the loan
 
-**Note:** The second audit pass found this contract otherwise well-designed with SafeERC20, nonReentrant, etc. This finding is about the logical completeness of the repayment verification.
+**Note:** This contract is otherwise well-designed with SafeERC20, nonReentrant, etc. This finding is about the logical completeness of the repayment verification.
 
 **Impact:** Potential flash loan funds drainage under specific conditions.
 
@@ -281,7 +281,7 @@ This means the router acts as a simple transfer mechanism without actual AMM swa
 **Severity:** 🔴 CRITICAL  
 **Category:** Integer Safety
 
-**Description:** `submitNetPosition()` uses `int256` for position tracking. Casting between `int256` and `uint256` (at lines 283, 286) with `uint256(-position)` is safe in Solidity 0.8.x but the netting logic doesn't validate that net positions don't exceed token balances.
+**Description:** `submitNetPosition()` uses `int256` for position tracking. Casting between `int256` and `uint256` (e.g., `uint256(-position)`) is safe in Solidity 0.8.x but the netting logic doesn't validate that net positions don't exceed token balances.
 
 **Impact:** Settlements could net to amounts exceeding available token balances, causing insolvency.
 
