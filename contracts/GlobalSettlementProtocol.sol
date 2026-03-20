@@ -83,11 +83,11 @@ contract GlobalSettlementProtocol is
         address _owner
     ) public initializer {
         __Ownable_init();
+        _transferOwnership(_owner);
         __UUPSUpgradeable_init();
         __ReentrancyGuard_init();
         __Pausable_init();
 
-        _transferOwnership(_owner);
         lzEndpoint = _lzEndpoint;
         timelock = _timelock;
     }
