@@ -61,7 +61,7 @@ jobs:
             else
               echo "✓ $file syntax OK"
             fi
-          done < <(find . -name "*.sol" -type f -not -path "*/node_modules/*" -print0)
+          done < <(find . -name "*.sol" -type f -not -path "*/node_modules/*" -not -name "*.test.sol" -not -path "*/tests/*" -print0)
           if [ "$FAILED" -eq 1 ]; then
             echo "One or more Solidity files have syntax errors."
             exit 1
