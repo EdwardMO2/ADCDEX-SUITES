@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.23;
+pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/token/ERC20/utils/SafeERC20Upgradeable.sol";
@@ -32,7 +32,7 @@ contract BondingMechanism is Initializable, UUPSUpgradeable, OwnableUpgradeable,
     event BondCreated(address indexed user, uint256 indexed bondId, uint256 adcAmount, uint256 vestingEnd);
     event BondClaimed(address indexed user, uint256 indexed bondId, uint256 claimedAmount);
     event EmergencyWithdrawal(address indexed recipient, address indexed token, uint256 amount);
-
+    
     function initialize(
         address _adcToken,
         address _treasury,
@@ -57,19 +57,14 @@ contract BondingMechanism is Initializable, UUPSUpgradeable, OwnableUpgradeable,
     /// @param amount Amount of tokens to bond
     function bondAsset(address token, uint256 amount) external whenNotPaused {
         require(amount > 0, "Invalid amount");
-
         IERC20Upgradeable(token).safeTransferFrom(msg.sender, treasury, amount);
-
         uint256 adcOut = getDiscountedADC(amount, token);
-
         Bond memory newBond = Bond({
             amountADC: adcOut,
             vestingEnd: block.timestamp + vestingDuration,
             claimed: 0
         });
-
         userBonds[msg.sender].push(newBond);
-
         emit BondCreated(msg.sender, userBonds[msg.sender].length - 1, adcOut, newBond.vestingEnd);
     }
 
@@ -79,12 +74,9 @@ contract BondingMechanism is Initializable, UUPSUpgradeable, OwnableUpgradeable,
         Bond storage bond = userBonds[msg.sender][bondId];
         require(block.timestamp >= bond.vestingEnd, "Bond still vesting");
         require(bond.claimed < bond.amountADC, "Already claimed");
-
         uint256 claimable = bond.amountADC - bond.claimed;
         bond.claimed = bond.amountADC;
-
         adcToken.safeTransfer(msg.sender, claimable);
-
         emit BondClaimed(msg.sender, bondId, claimable);
     }
 
@@ -139,7 +131,6 @@ contract BondingMechanism is Initializable, UUPSUpgradeable, OwnableUpgradeable,
     ) external onlyOwner whenPaused {
         require(recipient != address(0), "Invalid recipient");
         require(amount > 0, "Invalid amount");
-        
         IERC20Upgradeable(token).safeTransfer(recipient, amount);
         emit EmergencyWithdrawal(recipient, token, amount);
     }
