@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 env:
-  SOLC_VERSION: "0.8.20"
+  SOLC_VERSION: "0.8.23"
 
 jobs:
   validate-naming:
@@ -45,7 +45,7 @@ jobs:
         run: npm install
       - name: Install Solidity compiler
         run: |
-          wget https://github.com/ethereum/solidity/releases/download/v0.8.20/solc-static-linux
+          wget https://github.com/ethereum/solidity/releases/download/v0.8.23/solc-static-linux
           chmod +x solc-static-linux
           sudo mv solc-static-linux /usr/local/bin/solc
           solc --version  # verify the install
@@ -97,7 +97,7 @@ jobs:
             npx hardhat compile
           else
             echo "No Hardhat config found — falling back to solc"
-            wget https://github.com/ethereum/solidity/releases/download/v0.8.20/solc-static-linux
+            wget https://github.com/ethereum/solidity/releases/download/v0.8.23/solc-static-linux
             chmod +x solc-static-linux
             sudo mv solc-static-linux /usr/local/bin/solc
             solc --version  # verify the install
