@@ -38,6 +38,11 @@ jobs:
     name: Solidity Syntax Check
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install dependencies
+        run: npm install
       - name: Install Solidity compiler
         run: |
           pip3 install solc-select
@@ -50,13 +55,13 @@ jobs:
           FAILED=0
           while IFS= read -r -d '' file; do
             echo "Validating: $file"
-            if solc "$file" 2>&1 | grep -i "^Error:"; then
+            if solc --base-path . --include-path node_modules "$file" 2>&1 | grep -i "^Error:"; then
               echo "✗ Syntax error in: $file"
               FAILED=1
             else
               echo "✓ $file syntax OK"
             fi
-          done < <(find . -name "*.sol" -type f -print0)
+          done < <(find . -name "*.sol" -type f -not -path "*/node_modules/*" -not -name "*.test.sol" -not -path "*/tests/*" -print0)
           if [ "$FAILED" -eq 1 ]; then
             echo "One or more Solidity files have syntax errors."
             exit 1

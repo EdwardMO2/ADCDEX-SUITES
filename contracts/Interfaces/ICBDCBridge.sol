@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.23;
+pragma solidity ^0.8.20;
 
 /// @title ICBDCBridge
 /// @notice Interface for the Central Bank Digital Currency bridge contract

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.23;
+pragma solidity ^0.8.20;
 
 /// @title IStablecoinPools
 /// @notice Interface for the stablecoin-optimized multi-chain DEX pool module

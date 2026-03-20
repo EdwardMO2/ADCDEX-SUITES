@@ -1,17 +1,21 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.0;
+pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/utils/Timers.sol";
 
 contract BondingMechanism is Ownable {
     struct Timelock {
+        address executor;
         uint256 discount;
         uint256 vestingDuration;
         uint256 executions;
     }
 
     Timelock public timelock;
+
+    constructor(address _executor) Ownable() {
+        timelock.executor = _executor;
+    }
 
     modifier onlyTimelock() {
         require(msg.sender == timelock.executor, "Not allowed");
