@@ -307,6 +307,30 @@ contract ComplianceLayer is
     }
 
     // =========================================================================
+    // Audit Trail
+    // =========================================================================
+
+    /// @notice Returns the on-chain compliance event log for a user.
+    /// @dev    Callable by auditors, admins, and the user themselves.
+    /// @param user        Address whose audit trail is requested.
+    /// @return events     Array of event type strings in chronological order.
+    /// @return timestamps Block timestamps corresponding to each event.
+    function getAuditLog(address user)
+        external
+        view
+        returns (string[] memory events, uint256[] memory timestamps)
+    {
+        require(
+            hasRole(AUDITOR_ROLE, msg.sender) ||
+            hasRole(ADMIN_ROLE, msg.sender)   ||
+            msg.sender == user,
+            "ComplianceLayer: not authorized to view audit log"
+        );
+        events     = _eventLog[user];
+        timestamps = _eventTimestamps[user];
+    }
+
+    // =========================================================================
     // Admin
     // =========================================================================
 

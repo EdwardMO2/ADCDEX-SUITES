@@ -81,8 +81,14 @@ contract RouterQuote is
         require(route.fees.length == hops - 1, "RouterQuote: fees length mismatch");
         require(route.amountIn > 0, "RouterQuote: zero amountIn");
 
+        // Validate all token addresses in path are non-zero
+        for (uint256 i = 0; i < hops; i++) {
+            require(route.path[i] != address(0), "RouterQuote: zero token address in path");
+        }
+
         estimatedOut = route.amountIn;
         for (uint256 i = 0; i < hops - 1; i++) {
+            require(route.fees[i] <= BPS, "RouterQuote: fee exceeds 100%");
             uint256 fee  = (estimatedOut * route.fees[i]) / BPS;
             totalFees   += fee;
             estimatedOut = estimatedOut - fee;
@@ -119,6 +125,7 @@ contract RouterQuote is
             uint256 hopOut = splitAmt;
             uint256 hops   = r.path.length;
             for (uint256 j = 0; j < hops - 1; j++) {
+                require(r.fees[j] <= BPS, "RouterQuote: fee exceeds 100%");
                 uint256 fee = (hopOut * r.fees[j]) / BPS;
                 hopOut      = hopOut - fee;
             }
