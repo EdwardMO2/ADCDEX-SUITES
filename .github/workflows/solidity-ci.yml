@@ -46,8 +46,8 @@ jobs:
       - name: Install Solidity compiler
         run: |
           pip3 install solc-select
-          solc-select install ${{ env.SOLC_VERSION }}
-          solc-select use ${{ env.SOLC_VERSION }}
+          solc-select install 0.8.20
+          solc-select use 0.8.20
           echo "$HOME/.local/bin" >> $GITHUB_PATH
       - name: Validate all .sol files
         run: |
@@ -98,8 +98,8 @@ jobs:
           else
             echo "No Hardhat config found — falling back to solc"
             pip3 install solc-select
-            solc-select install ${{ env.SOLC_VERSION }}
-            solc-select use ${{ env.SOLC_VERSION }}
+            solc-select install 0.8.20
+            solc-select use 0.8.20
             export PATH="$HOME/.local/bin:$PATH"
             mkdir -p build
             FAILED=0
