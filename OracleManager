@@ -4,6 +4,7 @@ pragma solidity ^0.8.23;
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
 
 interface IADCDEX {
@@ -11,6 +12,7 @@ interface IADCDEX {
 }
 
 contract OracleManager is Initializable, UUPSUpgradeable, OwnableUpgradeable {
+    using SafeCast for int256;
     AggregatorV3Interface public chainlinkGoldFeed;
     address public adcDexPool;
     uint256 public twapWindow; // in seconds
@@ -48,7 +50,8 @@ contract OracleManager is Initializable, UUPSUpgradeable, OwnableUpgradeable {
         require(chainlinkPrice > 0, "Invalid Chainlink price");
 
         isChainlinkValid = (block.timestamp <= updatedAt + oracleStalenessThreshold);
-        price = uint256(chainlinkPrice);
+        // Safe cast: chainlinkPrice is verified positive above, so toUint256 is safe.
+        price = chainlinkPrice.toUint256();
     }
 
     function updateTWAP() external {
@@ -75,17 +78,16 @@ contract OracleManager is Initializable, UUPSUpgradeable, OwnableUpgradeable {
     }
 
     function getTWAP() public view returns (uint256 twapPrice) {
-        require(observations.length > 0, "No TWAP observations");
+        uint256 len = observations.length;
+        require(len > 0, "No TWAP observations");
 
         uint256 total = 0;
-        uint256 count = 0;
-
-        for (uint256 i = 0; i < observations.length; i++) {
+        for (uint256 i = 0; i < len; i++) {
             total += observations[i].price;
-            count++;
         }
 
-        twapPrice = total / count;
+        // len is verified > 0 above; division is safe
+        twapPrice = total / len;
     }
 
     function getEffectivePrice() public view returns (uint256 effectivePrice) {

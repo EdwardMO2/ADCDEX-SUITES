@@ -50,6 +50,8 @@ contract PerpetualsMarket is
     mapping(address => uint256) public prices;
     /// @notice Collateral token used for margin (e.g. USDC).
     address public collateralToken;
+    /// @notice Per-user nonce for unique position ID generation.
+    mapping(address => uint256) private _positionNonces;
 
     // =========================================================================
     // Constructor / Initializer
@@ -119,7 +121,8 @@ contract PerpetualsMarket is
         uint256 entryPrice = _getOraclePrice(token);
         uint256 size       = collateral * leverage;
 
-        // Liquidation price calculation (price moves that wipe collateral)
+        // Liquidation price calculation (price moves that wipe collateral).
+        // entryPrice is scaled by PRECISION (1e18); the ratio preserves that scale.
         // For long:  liqPrice = entryPrice * (leverage - 1) / leverage
         // For short: liqPrice = entryPrice * (leverage + 1) / leverage
         uint256 liquidationPrice;
@@ -132,7 +135,10 @@ contract PerpetualsMarket is
         // Pull collateral from user
         IERC20Upgradeable(collateralToken).safeTransferFrom(msg.sender, address(this), collateral);
 
-        positionId = keccak256(abi.encodePacked(msg.sender, token, block.timestamp, block.number));
+        // Include per-user nonce to prevent position ID collisions within the same block.
+        positionId = keccak256(
+            abi.encodePacked(msg.sender, token, block.timestamp, block.number, _positionNonces[msg.sender]++)
+        );
 
         positions[positionId] = Position({
             owner:            msg.sender,

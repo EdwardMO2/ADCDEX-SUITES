@@ -2,8 +2,9 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/security/Pausable.sol";
 
-contract BondingMechanism is Ownable {
+contract BondingMechanism is Ownable, Pausable {
     struct Timelock {
         address executor;
         uint256 discount;
@@ -22,19 +23,29 @@ contract BondingMechanism is Ownable {
         _;
     }
 
-    function requestDiscountChange(uint256 newDiscount) external onlyTimelock {
+    /// @notice Pause the contract. Only the owner may call this.
+    function pause() external onlyOwner {
+        _pause();
+    }
+
+    /// @notice Unpause the contract. Only the owner may call this.
+    function unpause() external onlyOwner {
+        _unpause();
+    }
+
+    function requestDiscountChange(uint256 newDiscount) external onlyTimelock whenNotPaused {
         timelock.discount = newDiscount;
     }
 
-    function executeDiscountChange() external onlyTimelock {
+    function executeDiscountChange() external onlyTimelock whenNotPaused {
         // Logic to apply the new discount
     }
 
-    function requestVestingDurationChange(uint256 newDuration) external onlyTimelock {
+    function requestVestingDurationChange(uint256 newDuration) external onlyTimelock whenNotPaused {
         timelock.vestingDuration = newDuration;
     }
 
-    function executeVestingDurationChange() external onlyTimelock {
+    function executeVestingDurationChange() external onlyTimelock whenNotPaused {
         // Logic to apply the new vesting duration
     }
 
