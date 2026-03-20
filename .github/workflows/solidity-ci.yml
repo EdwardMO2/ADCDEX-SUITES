@@ -45,10 +45,9 @@ jobs:
         run: npm install
       - name: Install Solidity compiler
         run: |
-          pip3 install solc-select
-          solc-select install 0.8.20
-          solc-select use 0.8.20
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          wget https://github.com/ethereum/solidity/releases/download/v0.8.20/solc-static-linux
+          chmod +x solc-static-linux
+          sudo mv solc-static-linux /usr/local/bin/solc
       - name: Validate all .sol files
         run: |
           export PATH="$HOME/.local/bin:$PATH"
@@ -97,10 +96,9 @@ jobs:
             npx hardhat compile
           else
             echo "No Hardhat config found — falling back to solc"
-            pip3 install solc-select
-            solc-select install 0.8.20
-            solc-select use 0.8.20
-            export PATH="$HOME/.local/bin:$PATH"
+            wget https://github.com/ethereum/solidity/releases/download/v0.8.20/solc-static-linux
+            chmod +x solc-static-linux
+            sudo mv solc-static-linux /usr/local/bin/solc
             mkdir -p build
             FAILED=0
             while IFS= read -r -d '' file; do
