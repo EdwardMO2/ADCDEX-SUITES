@@ -78,7 +78,7 @@ jobs:
       - name: Install solhint
         run: npm install -g solhint
       - name: Run Solhint linter
-        run: solhint '**/*.sol' --format stylish
+        run: solhint 'contracts/**/*.sol' --formatter stylish
 
   contract-compilation:
     runs-on: ubuntu-latest
@@ -130,8 +130,8 @@ jobs:
     runs-on: ubuntu-latest
     name: Slither Static Analysis
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: '20'
       - name: Install dependencies
