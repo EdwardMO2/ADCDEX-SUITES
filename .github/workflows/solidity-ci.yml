@@ -23,10 +23,10 @@ jobs:
         if: github.event_name == 'pull_request'
         run: |
           BRANCH_NAME="${{ github.head_ref }}"
-          if [[ "$BRANCH_NAME" =~ ^(feature|bugfix|hotfix|release|develop|main)/ ]]; then
+          if [[ "$BRANCH_NAME" =~ ^(feature|bugfix|hotfix|release|develop|main|copilot)/ ]]; then
             echo "✓ Branch follows naming convention: $BRANCH_NAME"
           else
-            echo "✗ Branch naming failed. Required: (feature|bugfix|hotfix|release|develop|main)/description"
+            echo "✗ Branch naming failed. Required: (feature|bugfix|hotfix|release|develop|main|copilot)/description"
             exit 1
           fi
 
