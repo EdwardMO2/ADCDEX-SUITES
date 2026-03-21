@@ -21,15 +21,15 @@ jobs:
     runs-on: ubuntu-latest
     name: Branch Naming Check
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Validate branch naming convention
         if: github.event_name == 'pull_request'
         run: |
           BRANCH_NAME="${{ github.head_ref }}"
-          if [[ "$BRANCH_NAME" =~ ^(feature|bugfix|hotfix|release|develop|main|copilot)/ ]]; then
+          if [[ "$BRANCH_NAME" =~ ^(feature|bugfix|hotfix|release|develop|main|copilot|dependabot)/ ]]; then
             echo "✓ Branch follows naming convention: $BRANCH_NAME"
           else
-            echo "✗ Branch naming failed. Required: (feature|bugfix|hotfix|release|develop|main|copilot)/description"
+            echo "✗ Branch naming failed. Required: (feature|bugfix|hotfix|release|develop|main|copilot|dependabot)/description"
             exit 1
           fi
 
@@ -37,8 +37,8 @@ jobs:
     runs-on: ubuntu-latest
     name: Solidity Syntax Check
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: '20'
       - name: Install dependencies
@@ -71,8 +71,8 @@ jobs:
     runs-on: ubuntu-latest
     name: Solhint Linter
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: '20'
       - name: Install solhint
@@ -84,8 +84,8 @@ jobs:
     runs-on: ubuntu-latest
     name: Contract Compilation
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: '20'
       - name: Compile contracts
@@ -118,7 +118,7 @@ jobs:
           fi
       - name: Upload build artifacts
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: compiled-contracts
           path: |
