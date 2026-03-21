@@ -110,7 +110,7 @@ jobs:
                 echo "✗ Compilation failed: $file"
                 FAILED=1
               fi
-            done < <(find contracts -name "*.sol" -type f -print0 2>/dev/null)
+            done < <( { find contracts -name "*.sol" -type f -print0 2>/dev/null || true; find . -maxdepth 1 -name "*.sol" -type f -print0 2>/dev/null || true; } )
             if [ "$FAILED" -eq 1 ]; then
               echo "One or more contracts failed to compile."
               exit 1
