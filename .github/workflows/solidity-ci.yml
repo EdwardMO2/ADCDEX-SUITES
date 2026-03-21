@@ -18,15 +18,15 @@ jobs:
     runs-on: ubuntu-latest
     name: Branch Naming Check
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Validate branch naming convention
         if: github.event_name == 'pull_request'
         run: |
           BRANCH_NAME="${{ github.head_ref }}"
-          if [[ "$BRANCH_NAME" =~ ^(feature|bugfix|hotfix|release|develop|main|copilot)/ ]]; then
+          if [[ "$BRANCH_NAME" =~ ^(feature|bugfix|hotfix|release|copilot)/ ]] || [[ "$BRANCH_NAME" =~ ^(main|develop)$ ]]; then
             echo "✓ Branch follows naming convention: $BRANCH_NAME"
           else
-            echo "✗ Branch naming failed. Required: (feature|bugfix|hotfix|release|develop|main|copilot)/description"
+            echo "✗ Branch naming failed. Required: main, develop, or (feature|bugfix|hotfix|release|copilot)/description"
             exit 1
           fi
 
@@ -34,17 +34,18 @@ jobs:
     runs-on: ubuntu-latest
     name: Solidity Syntax Check
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Install Solidity compiler
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq solc
       - name: Validate all .sol files
         run: |
+          set -o pipefail
           FAILED=0
           while IFS= read -r -d '' file; do
             echo "Validating: $file"
-            if solc "$file" 2>&1 | grep -i "^Error:"; then
+            if ! solc "$file" 2>&1; then
               echo "✗ Syntax error in: $file"
               FAILED=1
             else
@@ -60,22 +61,21 @@ jobs:
     runs-on: ubuntu-latest
     name: Solhint Linter
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-node@v3
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '18'
       - name: Install solhint
         run: npm install -g solhint
       - name: Run Solhint linter
         run: solhint '**/*.sol' --format stylish
-        continue-on-error: true
 
   contract-compilation:
     runs-on: ubuntu-latest
     name: Contract Compilation
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-node@v3
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '18'
       - name: Compile contracts
@@ -88,17 +88,25 @@ jobs:
             echo "No Hardhat config found — falling back to solc"
             sudo apt-get update -qq
             sudo apt-get install -y -qq solc
+            if [ -f "package.json" ]; then
+              echo "package.json found — installing dependencies for import resolution"
+              npm install
+            fi
             mkdir -p build
+            SOLC_IMPORT_OPTS=()
+            if [ -d "node_modules" ]; then
+              SOLC_IMPORT_OPTS=(--base-path . --include-path node_modules)
+            fi
             FAILED=0
             while IFS= read -r -d '' file; do
               echo "Compiling: $file"
-              if solc --optimize --bin --abi "$file" -o build/ 2>&1; then
+              if solc --optimize --bin --abi "${SOLC_IMPORT_OPTS[@]}" "$file" -o build/ 2>&1; then
                 echo "✓ Compiled: $file"
               else
                 echo "✗ Compilation failed: $file"
                 FAILED=1
               fi
-            done < <(find contracts -name "*.sol" -type f -print0 2>/dev/null)
+            done < <( { find contracts -name "*.sol" -type f -print0 2>/dev/null || true; find . -maxdepth 1 -name "*.sol" -type f -print0 2>/dev/null || true; } )
             if [ "$FAILED" -eq 1 ]; then
               echo "One or more contracts failed to compile."
               exit 1
@@ -106,7 +114,7 @@ jobs:
           fi
       - name: Upload build artifacts
         if: success()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: compiled-contracts
           path: |
