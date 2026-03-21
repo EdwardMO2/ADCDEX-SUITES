@@ -26,10 +26,10 @@ jobs:
         if: github.event_name == 'pull_request'
         run: |
           BRANCH_NAME="${{ github.head_ref }}"
-          if [[ "$BRANCH_NAME" =~ ^(feature|bugfix|hotfix|release|develop|main|copilot|dependabot)/ ]]; then
+          if [[ "$BRANCH_NAME" =~ ^(feature|bugfix|hotfix|release|copilot|dependabot)/ ]] || [[ "$BRANCH_NAME" =~ ^(main|develop)$ ]]; then
             echo "✓ Branch follows naming convention: $BRANCH_NAME"
           else
-            echo "✗ Branch naming failed. Required: (feature|bugfix|hotfix|release|develop|main|copilot|dependabot)/description"
+            echo "✗ Branch naming failed. Required: main, develop, or (feature|bugfix|hotfix|release|copilot|dependabot)/description"
             exit 1
           fi
 
@@ -55,7 +55,10 @@ jobs:
           FAILED=0
           while IFS= read -r -d '' file; do
             echo "Validating: $file"
-            if solc --base-path . --include-path node_modules "$file" 2>&1 | grep -i "^Error:"; then
+            OUTPUT=$(solc --base-path . --include-path node_modules "$file" 2>&1)
+            EXIT_CODE=$?
+            if [ $EXIT_CODE -ne 0 ] || echo "$OUTPUT" | grep -qiE "^(Error|ParserError|TypeError):"; then
+              echo "$OUTPUT"
               echo "✗ Syntax error in: $file"
               FAILED=1
             else
@@ -142,3 +145,4 @@ jobs:
         run: slither contracts/ --compile-force-framework hardhat --hardhat-ignore-compile || true
         # Note: `|| true` is used here only to prevent CI blocking on informational findings.
         # Review Slither output in the step logs. Remove `|| true` once all findings are triaged.
+
