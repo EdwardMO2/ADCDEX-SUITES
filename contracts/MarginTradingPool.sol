@@ -108,6 +108,16 @@ contract MarginTradingPool is
     // =========================================================================
     // Collateral Management
     // =========================================================================
+    //
+    // ⚠️  SECURITY NOTICE — NO ORACLE INTEGRATION
+    // This pool assumes a 1:1 value ratio between collateralToken and borrowToken.
+    // If the two tokens have different market prices, the health factor calculation
+    // is economically meaningless and the pool is exposed to under-collateralisation
+    // and bad debt.
+    //
+    // TODO: Integrate a decentralised price oracle (e.g. Chainlink) for both
+    //       collateralToken and borrowToken before mainnet deployment, and
+    //       incorporate real USD values into _computeHealthFactor().
 
     /// @notice Deposit collateral into your margin account.
     /// @param amount Amount of collateralToken to deposit.

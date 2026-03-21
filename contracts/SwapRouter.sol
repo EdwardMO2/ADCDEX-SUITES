@@ -118,6 +118,16 @@ contract SwapRouter is
     // =========================================================================
     // Swap Execution
     // =========================================================================
+    //
+    // ⚠️  SECURITY NOTICE — SIMPLIFIED / TESTNET IMPLEMENTATION
+    // The swap functions below are a synthetic approximation: they deduct
+    // hop fees mathematically but do NOT call external pool contracts.
+    // Output tokens must already be held by this router contract.
+    // This design is acceptable for testnet and integration testing, but
+    // MUST be replaced with actual pool interactions before mainnet deployment.
+    //
+    // TODO: Integrate real pool contract calls (e.g. Uniswap v3/v4 style) on
+    //       each hop of the route before any production deployment.
 
     /// @notice Execute a multi-hop swap along a single route.
     /// @dev    Simplified implementation: executes a direct transfer for each hop

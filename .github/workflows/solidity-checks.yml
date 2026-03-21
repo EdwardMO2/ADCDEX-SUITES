@@ -15,7 +15,7 @@ jobs:
         with:
           node-version: '20'
       - run: npm install -g solhint
-      - run: solhint 'contracts/**/*.sol' || true
+      - run: solhint 'contracts/**/*.sol'
 
   compile:
     runs-on: ubuntu-latest
@@ -24,8 +24,8 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: '20'
-      - run: npm install --save-dev hardhat
-      - run: npx hardhat compile || echo "Skipped"
+      - run: npm install
+      - run: npx hardhat compile
 
   validate-branch:
     runs-on: ubuntu-latest
