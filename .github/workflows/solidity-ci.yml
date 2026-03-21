@@ -35,23 +35,35 @@ jobs:
     name: Solidity Syntax Check
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      - name: Install dependencies for import resolution
+        run: |
+          if [ ! -f "package.json" ]; then
+            echo '{"name":"ci-deps","version":"1.0.0","dependencies":{"@openzeppelin/contracts":"^4.9.6"}}' > package.json
+          fi
+          npm install
       - name: Install Solidity compiler
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq solc
       - name: Validate all .sol files
         run: |
-          set -o pipefail
           FAILED=0
+          SOLC_IMPORT_OPTS=()
+          if [ -d "node_modules" ]; then
+            SOLC_IMPORT_OPTS=(--base-path . --include-path node_modules)
+          fi
           while IFS= read -r -d '' file; do
             echo "Validating: $file"
-            if ! solc "$file" 2>&1; then
+            if ! solc "${SOLC_IMPORT_OPTS[@]}" "$file" 2>&1; then
               echo "✗ Syntax error in: $file"
               FAILED=1
             else
               echo "✓ $file syntax OK"
             fi
-          done < <(find . -name "*.sol" -type f -print0)
+          done < <(find . -name "*.sol" -type f -not -path "*/node_modules/*" -print0)
           if [ "$FAILED" -eq 1 ]; then
             echo "One or more Solidity files have syntax errors."
             exit 1
@@ -88,10 +100,11 @@ jobs:
             echo "No Hardhat config found — falling back to solc"
             sudo apt-get update -qq
             sudo apt-get install -y -qq solc
-            if [ -f "package.json" ]; then
-              echo "package.json found — installing dependencies for import resolution"
-              npm install
+            if [ ! -f "package.json" ]; then
+              echo '{"name":"ci-deps","version":"1.0.0","dependencies":{"@openzeppelin/contracts":"^4.9.6"}}' > package.json
             fi
+            echo "Installing dependencies for import resolution"
+            npm install
             mkdir -p build
             SOLC_IMPORT_OPTS=()
             if [ -d "node_modules" ]; then
