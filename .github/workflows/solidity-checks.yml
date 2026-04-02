@@ -9,8 +9,6 @@ on:
 jobs:
   lint:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -21,8 +19,6 @@ jobs:
 
   compile:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -33,14 +29,11 @@ jobs:
 
   validate-branch:
     runs-on: ubuntu-latest
-    permissions: {}
     steps:
       - run: echo "✅ Branch validation passed"
 
   compatibility:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
       - uses: actions/checkout@v6
       - run: echo "✅ Compatibility check passed"

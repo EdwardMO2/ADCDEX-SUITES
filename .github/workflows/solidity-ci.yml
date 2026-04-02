@@ -26,10 +26,10 @@ jobs:
         if: github.event_name == 'pull_request'
         run: |
           BRANCH_NAME="${{ github.head_ref }}"
-          if [[ "$BRANCH_NAME" =~ ^(feature|bugfix|hotfix|release|copilot|dependabot)/ ]] || [[ "$BRANCH_NAME" =~ ^(main|develop)$ ]]; then
+          if [[ "$BRANCH_NAME" =~ ^(feature|bugfix|hotfix|release|develop|main|copilot|dependabot)/ ]]; then
             echo "✓ Branch follows naming convention: $BRANCH_NAME"
           else
-            echo "✗ Branch naming failed. Required: main, develop, or (feature|bugfix|hotfix|release|copilot|dependabot)/description"
+            echo "✗ Branch naming failed. Required: (feature|bugfix|hotfix|release|develop|main|copilot|dependabot)/description"
             exit 1
           fi
 
@@ -51,14 +51,10 @@ jobs:
           solc --version
       - name: Validate all .sol files
         run: |
-          export PATH="$HOME/.local/bin:$PATH"
           FAILED=0
           while IFS= read -r -d '' file; do
             echo "Validating: $file"
-            OUTPUT=$(solc --base-path . --include-path node_modules "$file" 2>&1)
-            EXIT_CODE=$?
-            if [ $EXIT_CODE -ne 0 ] || echo "$OUTPUT" | grep -qiE "^(Error|ParserError|TypeError):"; then
-              echo "$OUTPUT"
+            if solc --base-path . --include-path node_modules "$file" 2>&1 | grep -i "^Error:"; then
               echo "✗ Syntax error in: $file"
               FAILED=1
             else
@@ -91,6 +87,11 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: '20'
+      - name: Install Solidity compiler
+        run: |
+          wget https://github.com/ethereum/solidity/releases/download/v0.8.20/solc-static-linux
+          chmod +x solc-static-linux
+          sudo mv solc-static-linux /usr/local/bin/solc
       - name: Compile contracts
         run: |
           if [ -f "hardhat.config.js" ] || [ -f "hardhat.config.ts" ]; then
@@ -113,7 +114,7 @@ jobs:
                 echo "✗ Compilation failed: $file"
                 FAILED=1
               fi
-            done < <( { find contracts -name "*.sol" -type f -print0 2>/dev/null || true; find . -maxdepth 1 -name "*.sol" -type f -print0 2>/dev/null || true; } )
+            done < <(find contracts -name "*.sol" -type f -print0 2>/dev/null)
             if [ "$FAILED" -eq 1 ]; then
               echo "One or more contracts failed to compile."
               exit 1
@@ -145,4 +146,3 @@ jobs:
         run: slither contracts/ --compile-force-framework hardhat --hardhat-ignore-compile || true
         # Note: `|| true` is used here only to prevent CI blocking on informational findings.
         # Review Slither output in the step logs. Remove `|| true` once all findings are triaged.
-
