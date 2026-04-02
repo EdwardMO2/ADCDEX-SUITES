@@ -88,6 +88,15 @@ contract PerpetualsMarket is
     // =========================================================================
     // Price Feed (simple owner-controlled, for testing and early deployment)
     // =========================================================================
+    //
+    // ⚠️  SECURITY NOTICE — CENTRALISED ORACLE RISK
+    // The owner can set arbitrary token prices, enabling manipulation of all
+    // positions (forced liquidations, value extraction).  This is intentional
+    // for testnet and early deployment but is CRITICAL for any mainnet launch.
+    //
+    // TODO: Replace owner-controlled prices with a decentralised oracle such as
+    //       Chainlink Data Feeds before mainnet deployment.
+    //       See https://docs.chain.link/data-feeds
 
     /// @notice Set the oracle price for a token.
     /// @param token Token address.
