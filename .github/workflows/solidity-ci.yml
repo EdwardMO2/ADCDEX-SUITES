@@ -51,7 +51,6 @@ jobs:
           solc --version
       - name: Validate all .sol files
         run: |
-          export PATH="$HOME/.local/bin:$PATH"
           FAILED=0
           while IFS= read -r -d '' file; do
             echo "Validating: $file"
@@ -88,6 +87,11 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: '20'
+      - name: Install Solidity compiler
+        run: |
+          wget https://github.com/ethereum/solidity/releases/download/v0.8.20/solc-static-linux
+          chmod +x solc-static-linux
+          sudo mv solc-static-linux /usr/local/bin/solc
       - name: Compile contracts
         run: |
           if [ -f "hardhat.config.js" ] || [ -f "hardhat.config.ts" ]; then
