@@ -21,15 +21,15 @@ jobs:
     runs-on: ubuntu-latest
     name: Branch Naming Check
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Validate branch naming convention
         if: github.event_name == 'pull_request'
         run: |
           BRANCH_NAME="${{ github.head_ref }}"
-          if [[ "$BRANCH_NAME" =~ ^(feature|bugfix|hotfix|release|develop|main|copilot)/ ]]; then
+          if [[ "$BRANCH_NAME" =~ ^(feature|bugfix|hotfix|release|develop|main|copilot|dependabot)/ ]]; then
             echo "✓ Branch follows naming convention: $BRANCH_NAME"
           else
-            echo "✗ Branch naming failed. Required: (feature|bugfix|hotfix|release|develop|main|copilot)/description"
+            echo "✗ Branch naming failed. Required: (feature|bugfix|hotfix|release|develop|main|copilot|dependabot)/description"
             exit 1
           fi
 
@@ -37,17 +37,18 @@ jobs:
     runs-on: ubuntu-latest
     name: Solidity Syntax Check
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: '20'
       - name: Install dependencies
         run: npm install
       - name: Install Solidity compiler
         run: |
-          wget https://github.com/ethereum/solidity/releases/download/v0.8.20/solc-static-linux
+          wget https://github.com/ethereum/solidity/releases/download/v${SOLC_VERSION}/solc-static-linux
           chmod +x solc-static-linux
           sudo mv solc-static-linux /usr/local/bin/solc
+          solc --version
       - name: Validate all .sol files
         run: |
           FAILED=0
@@ -69,22 +70,21 @@ jobs:
     runs-on: ubuntu-latest
     name: Solhint Linter
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: '20'
       - name: Install solhint
         run: npm install -g solhint
       - name: Run Solhint linter
-        run: solhint '**/*.sol' --format stylish
-        continue-on-error: true
+        run: solhint 'contracts/**/*.sol' --formatter stylish
 
   contract-compilation:
     runs-on: ubuntu-latest
     name: Contract Compilation
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: '20'
       - name: Install Solidity compiler
@@ -100,6 +100,10 @@ jobs:
             npx hardhat compile
           else
             echo "No Hardhat config found — falling back to solc"
+            wget https://github.com/ethereum/solidity/releases/download/v${SOLC_VERSION}/solc-static-linux
+            chmod +x solc-static-linux
+            sudo mv solc-static-linux /usr/local/bin/solc
+            solc --version
             mkdir -p build
             FAILED=0
             while IFS= read -r -d '' file; do
@@ -118,10 +122,27 @@ jobs:
           fi
       - name: Upload build artifacts
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: compiled-contracts
           path: |
             build/
             artifacts/
           if-no-files-found: ignore
+
+  slither-analysis:
+    runs-on: ubuntu-latest
+    name: Slither Static Analysis
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+      - name: Install dependencies
+        run: npm install
+      - name: Install Slither
+        run: pip3 install slither-analyzer
+      - name: Run Slither
+        run: slither contracts/ --compile-force-framework hardhat --hardhat-ignore-compile || true
+        # Note: `|| true` is used here only to prevent CI blocking on informational findings.
+        # Review Slither output in the step logs. Remove `|| true` once all findings are triaged.

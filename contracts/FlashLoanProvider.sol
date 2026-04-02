@@ -163,16 +163,14 @@ contract FlashLoanProvider is
     // Fee Withdrawal
     // =========================================================================
 
-    /// @notice Withdraw accumulated fees for a token.
+    /// @notice Withdraw accumulated fees for a token to the designated fee collector.
     /// @param token ERC-20 token whose fees are to be withdrawn.
-    /// @param to    Recipient address.
-    function withdrawFees(address token, address to) external onlyOwner {
-        require(to != address(0), "FlashLoanProvider: zero recipient");
+    function withdrawFees(address token) external onlyOwner {
         uint256 amount = feeAccrued[token];
         require(amount > 0, "FlashLoanProvider: no fees");
         feeAccrued[token] = 0;
-        IERC20Upgradeable(token).safeTransfer(to, amount);
-        emit FeesWithdrawn(token, to, amount);
+        IERC20Upgradeable(token).safeTransfer(feeCollector, amount);
+        emit FeesWithdrawn(token, feeCollector, amount);
     }
 
     // =========================================================================
