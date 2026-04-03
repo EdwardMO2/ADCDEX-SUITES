@@ -341,13 +341,13 @@ contract GlobalSettlementProtocol is
     /// @inheritdoc ISettlementProtocol
     function rebalanceSDR() external override whenNotPaused {
         SDRBasket storage basket = _sdrBasket;
-        require(basket.tokens.length > 0, "Basket not configured");
+        address[] memory tokens = basket.tokens;
+        uint256 tokenCount = tokens.length;
+        require(tokenCount > 0, "Basket not configured");
 
         uint256 totalValue;
-        uint256 tokenCount = basket.tokens.length;
         for (uint256 i = 0; i < tokenCount; ) {
-            // Use on-chain balance as a proxy for value (oracle can be plugged in)
-            totalValue += IERC20Upgradeable(basket.tokens[i]).balanceOf(address(this));
+            totalValue += IERC20Upgradeable(tokens[i]).balanceOf(address(this));
             unchecked { ++i; }
         }
 
@@ -539,9 +539,10 @@ contract GlobalSettlementProtocol is
         uint256 amount,
         bytes memory /*complianceData*/
     ) internal {
-        uint256 hookCount = _complianceHooks.length;
+        address[] memory hooks = _complianceHooks;
+        uint256 hookCount = hooks.length;
         for (uint256 i = 0; i < hookCount; ) {
-            address hook = _complianceHooks[i];
+            address hook = hooks[i];
             (bool success, ) = hook.call{gas: 100_000}(
                 abi.encodeWithSignature(
                     "screenTransaction(address,uint256,bytes32)",

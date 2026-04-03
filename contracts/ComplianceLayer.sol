@@ -377,9 +377,10 @@ contract ComplianceLayer is
         if (rec.riskLevel == RiskLevel.Blocked) return (false, "High-risk account blocked");
 
         // Check active compliance rules
-        uint256 ruleCount = _ruleIds.length;
+        bytes32[] memory ruleIds = _ruleIds;
+        uint256 ruleCount = ruleIds.length;
         for (uint256 i = 0; i < ruleCount; ) {
-            ComplianceRule storage rule = _rules[_ruleIds[i]];
+            ComplianceRule storage rule = _rules[ruleIds[i]];
             if (!rule.active) {
                 unchecked { ++i; }
                 continue;

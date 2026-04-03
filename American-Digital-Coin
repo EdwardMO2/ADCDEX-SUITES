@@ -191,8 +191,10 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
         require(adcAmount <= DAILY_REDEMPTION_LIMIT && _balances[msg.sender] >= adcAmount, "Exceeds redemption limit or balance");
         require(dailyRedemptionVolume[msg.sender][currentDay] + adcAmount <= DAILY_REDEMPTION_LIMIT, "Exceeds daily limit");
         dailyRedemptionVolume[msg.sender][currentDay] += adcAmount;
-        uint256 usdcValue = (adcAmount * getBasePrice()) / PRECISION / 10**2;
-        require(reserveBalances[stablecoin] >= usdcValue && getReserveHealth() >= RESERVE_THRESHOLD, "Insufficient reserves or health");
+        uint256 reserveValue = getTotalReserveValue();
+        uint256 basePrice = _getBasePriceWithReserve(reserveValue);
+        uint256 usdcValue = (adcAmount * basePrice) / PRECISION / 10**2;
+        require(reserveBalances[stablecoin] >= usdcValue && _getReserveHealth(reserveValue, basePrice) >= RESERVE_THRESHOLD, "Insufficient reserves or health");
         _burnADC(msg.sender, adcAmount);
         reserveBalances[stablecoin] -= usdcValue;
         require(IERC20Upgradeable(stablecoin).transfer(msg.sender, usdcValue), "Redemption transfer failed");
@@ -200,10 +202,12 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
     }
 
     function batchAddMerchants(address[] calldata merchants) external onlyOwner {
-        require(merchants.length <= 100, "Too many merchants");
-        for (uint256 i = 0; i < merchants.length; i++) {
+        uint256 len = merchants.length;
+        require(len <= 100, "Too many merchants");
+        for (uint256 i = 0; i < len; ) {
             whitelistedMerchants[merchants[i]] = true;
             emit MerchantAdded(merchants[i]);
+            unchecked { ++i; }
         }
     }
 
@@ -284,7 +288,9 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
 
     function stakeNFT(uint256 tokenId, uint256 amount) external whenNotPaused {
         require(_owners[tokenId] == msg.sender && !stakedNFTs[tokenId].isStaked, "Invalid ownership or already staked");
-        require(_balances[msg.sender] >= amount && getReserveHealth() >= RESERVE_THRESHOLD, "Insufficient balance or reserve health");
+        uint256 reserveValue = getTotalReserveValue();
+        uint256 basePrice = _getBasePriceWithReserve(reserveValue);
+        require(_balances[msg.sender] >= amount && _getReserveHealth(reserveValue, basePrice) >= RESERVE_THRESHOLD, "Insufficient balance or reserve health");
         _transfer(msg.sender, address(this), amount);
         stakedNFTs[tokenId] = Stake(true, block.timestamp, amount);
         emit NFTStaked(msg.sender, tokenId, amount);
@@ -321,26 +327,37 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
     }
 
     function getBasePrice() public view returns (uint256) {
-        (, int256 goldPrice,, uint256 updatedAt,) = goldPriceFeed.latestRoundData();
-        require(goldPrice > 0, "Invalid gold price");
-        require(block.timestamp <= updatedAt + ORACLE_STALENESS_THRESHOLD, "Oracle data stale");
-        uint256 goldBase = uint256(goldPrice) * 16;
-        if (getTotalReserveValue() == 0 || _totalSupply == 0) return goldBase;
-        return (goldBase * getTotalReserveValue() * 10**2 * PRECISION) / (_totalSupply * PRECISION);
+        return _getBasePriceWithReserve(getTotalReserveValue());
     }
 
     function getTotalReserveValue() public view returns (uint256) {
         uint256 total = 0;
-        for (uint256 i = 0; i < supportedStablecoins.length; i++) {
+        uint256 len = supportedStablecoins.length;
+        for (uint256 i = 0; i < len; ) {
             total += reserveBalances[supportedStablecoins[i]];
+            unchecked { ++i; }
         }
         return total;
     }
 
     function getReserveHealth() public view returns (uint256) {
-        uint256 basePrice = getBasePrice();
+        uint256 reserveValue = getTotalReserveValue();
+        uint256 basePrice = _getBasePriceWithReserve(reserveValue);
+        return _getReserveHealth(reserveValue, basePrice);
+    }
+
+    function _getBasePriceWithReserve(uint256 reserveValue) internal view returns (uint256) {
+        (, int256 goldPrice,, uint256 updatedAt,) = goldPriceFeed.latestRoundData();
+        require(goldPrice > 0, "Invalid gold price");
+        require(block.timestamp <= updatedAt + ORACLE_STALENESS_THRESHOLD, "Oracle data stale");
+        uint256 goldBase = uint256(goldPrice) * 16;
+        if (reserveValue == 0 || _totalSupply == 0) return goldBase;
+        return (goldBase * reserveValue * 10**2 * PRECISION) / (_totalSupply * PRECISION);
+    }
+
+    function _getReserveHealth(uint256 reserveValue, uint256 basePrice) internal view returns (uint256) {
         uint256 supplyValue = (_totalSupply * basePrice) / PRECISION / 10**2;
-        return supplyValue > 0 ? (getTotalReserveValue() * PRECISION / supplyValue) : PRECISION;
+        return supplyValue > 0 ? (reserveValue * PRECISION / supplyValue) : PRECISION;
     }
 
     function _mintADC(address to, uint256 value) internal {
@@ -378,8 +395,8 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
         feePool += (fee - subsidyShare);
     }
 
-    function name() public view returns (string memory) { return _name; }
-    function symbol() public view returns (string memory) { return _symbol; }
+    function name() public pure returns (string memory) { return "American Digital Currency"; }
+    function symbol() public pure returns (string memory) { return "ADC"; }
     function decimals() public pure returns (uint8) { return 18; }
 
     function balanceOf(address account) public view returns (uint256) { return _balances[account]; }
