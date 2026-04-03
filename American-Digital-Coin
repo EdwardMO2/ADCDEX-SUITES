@@ -117,6 +117,7 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
         require(_primaryStablecoin != address(0), "Invalid stablecoin address");
         require(_goldPriceFeed != address(0), "Invalid price feed address");
         require(_treasury != address(0), "Invalid treasury address");
+        require(_decimals > 0 && _decimals <= 18, "Invalid decimals");
         __ReentrancyGuard_init();
         __UUPSUpgradeable_init();
         __Ownable_init();
@@ -226,6 +227,7 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
         require(stablecoin != address(0), "Invalid stablecoin");
         require(!isSupportedStablecoin[stablecoin], "Already supported");
         require(supportedStablecoins.length < MAX_SUPPORTED_STABLECOINS, "Max stablecoins reached");
+        require(decimals_ > 0 && decimals_ <= 18, "Invalid decimals");
         supportedStablecoins.push(stablecoin);
         isSupportedStablecoin[stablecoin] = true;
         stablecoinDecimals[stablecoin] = decimals_;
@@ -432,10 +434,11 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
         return supplyValue > 0 ? (totalReserveValue * PRECISION / supplyValue) : PRECISION;
     }
 
-    /// @notice Scale a stablecoin amount to 8-decimal base representation (price uses 10**2 = 6→8 for USDC).
+    /// @notice Scale a stablecoin amount to 8-decimal base representation.
     ///         For 6-decimal tokens: amount * 10**2 = 8-digit base.
     ///         For 18-decimal tokens: amount / 10**10 = 8-digit base.
     function _scaleToBase(uint256 amount, uint8 tokenDecimals) internal pure returns (uint256) {
+        require(tokenDecimals > 0 && tokenDecimals <= 18, "Invalid decimals");
         if (tokenDecimals <= 8) {
             return amount * (10 ** (8 - tokenDecimals));
         } else {
@@ -445,6 +448,7 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
 
     /// @notice Convert ADC amount (18 decimals) at basePrice into stablecoin-native units.
     function _scaleFromBase(uint256 adcAmount, uint256 basePrice, uint8 tokenDecimals) internal pure returns (uint256) {
+        require(tokenDecimals > 0 && tokenDecimals <= 18, "Invalid decimals");
         // First compute value in 8-decimal base: (adcAmount * basePrice) / PRECISION
         // Then convert to token-native decimals
         uint256 baseValue = (adcAmount * basePrice) / PRECISION;
