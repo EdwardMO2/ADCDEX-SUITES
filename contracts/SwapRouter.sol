@@ -154,10 +154,14 @@ contract SwapRouter is
         );
 
         amountOut = route.amountIn;
-        for (uint256 i = 0; i < hops - 1; i++) {
+        uint256 hopCount = hops - 1;
+        for (uint256 i = 0; i < hopCount; ) {
             // Deduct hop fee
             uint256 fee = (amountOut * route.fees[i]) / BPS;
-            amountOut   = amountOut - fee;
+            unchecked {
+                amountOut = amountOut - fee;
+                ++i;
+            }
         }
 
         require(amountOut >= minAmountOut, "SwapRouter: insufficient output");
@@ -185,8 +189,9 @@ contract SwapRouter is
         require(numRoutes == splitRoute.weights.length, "SwapRouter: weights mismatch");
 
         uint256 totalWeight;
-        for (uint256 i = 0; i < numRoutes; i++) {
+        for (uint256 i = 0; i < numRoutes; ) {
             totalWeight += splitRoute.weights[i];
+            unchecked { ++i; }
         }
         require(totalWeight == BPS, "SwapRouter: weights must sum to BPS");
 
@@ -196,21 +201,25 @@ contract SwapRouter is
 
         IERC20Upgradeable(tokenIn).safeTransferFrom(msg.sender, address(this), totalIn);
 
-        for (uint256 i = 0; i < numRoutes; i++) {
-            Route memory r = splitRoute.routes[i];
+        for (uint256 i = 0; i < numRoutes; ) {
+            Route calldata r = splitRoute.routes[i];
             uint256 splitAmt = (totalIn * splitRoute.weights[i]) / BPS;
 
             uint256 hopOut = splitAmt;
             uint256 hops   = r.path.length;
-            for (uint256 j = 0; j < hops - 1; j++) {
+            for (uint256 j = 0; j < hops - 1; ) {
                 uint256 fee = (hopOut * r.fees[j]) / BPS;
-                hopOut      = hopOut - fee;
+                unchecked {
+                    hopOut = hopOut - fee;
+                    ++j;
+                }
             }
 
             if (hopOut > 0) {
                 IERC20Upgradeable(r.path[hops - 1]).safeTransfer(msg.sender, hopOut);
             }
             totalAmountOut += hopOut;
+            unchecked { ++i; }
         }
 
         emit SplitRouteExecuted(msg.sender, totalAmountOut);

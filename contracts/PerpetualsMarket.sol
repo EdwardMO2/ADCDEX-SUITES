@@ -135,10 +135,12 @@ contract PerpetualsMarket is
         // For long:  liqPrice = entryPrice * (leverage - 1) / leverage
         // For short: liqPrice = entryPrice * (leverage + 1) / leverage
         uint256 liquidationPrice;
-        if (isLong) {
-            liquidationPrice = (entryPrice * (leverage - 1)) / leverage;
-        } else {
-            liquidationPrice = (entryPrice * (leverage + 1)) / leverage;
+        unchecked {
+            if (isLong) {
+                liquidationPrice = (entryPrice * (leverage - 1)) / leverage;
+            } else {
+                liquidationPrice = (entryPrice * (leverage + 1)) / leverage;
+            }
         }
 
         // Pull collateral from user
@@ -218,7 +220,8 @@ contract PerpetualsMarket is
         uint256 currentPrice = _getOraclePrice(pos.token);
         require(_isLiquidatable(pos, currentPrice), "PM: not liquidatable");
 
-        uint256 reward = (pos.collateral * LIQUIDATION_REWARD_BPS) / BPS;
+        uint256 reward;
+        unchecked { reward = (pos.collateral * LIQUIDATION_REWARD_BPS) / BPS; }
         address posOwner = pos.owner;
         delete positions[positionId];
 

@@ -59,12 +59,13 @@ contract BondingMechanism is Ownable, Pausable {
 
     /// @notice Execute a previously requested discount change after the timelock delay.
     function executeDiscountChange() external onlyTimelock whenNotPaused {
-        require(timelock.discountExecutableAt > 0, "BondingMechanism: no pending discount change");
-        require(block.timestamp >= timelock.discountExecutableAt, "BondingMechanism: timelock not expired");
-        timelock.discount = timelock.pendingDiscount;
-        timelock.discountExecutableAt = 0;
-        timelock.executions += 1;
-        emit DiscountChangeExecuted(timelock.discount);
+        Timelock storage tl = timelock;
+        require(tl.discountExecutableAt > 0, "BondingMechanism: no pending discount change");
+        require(block.timestamp >= tl.discountExecutableAt, "BondingMechanism: timelock not expired");
+        tl.discount = tl.pendingDiscount;
+        tl.discountExecutableAt = 0;
+        unchecked { tl.executions += 1; }
+        emit DiscountChangeExecuted(tl.discount);
     }
 
     /// @notice Request a vesting duration change. The change is not applied immediately;
@@ -78,11 +79,12 @@ contract BondingMechanism is Ownable, Pausable {
 
     /// @notice Execute a previously requested vesting duration change after the timelock delay.
     function executeVestingDurationChange() external onlyTimelock whenNotPaused {
-        require(timelock.vestingExecutableAt > 0, "BondingMechanism: no pending vesting change");
-        require(block.timestamp >= timelock.vestingExecutableAt, "BondingMechanism: timelock not expired");
-        timelock.vestingDuration = timelock.pendingVestingDuration;
-        timelock.vestingExecutableAt = 0;
-        timelock.executions += 1;
-        emit VestingDurationChangeExecuted(timelock.vestingDuration);
+        Timelock storage tl = timelock;
+        require(tl.vestingExecutableAt > 0, "BondingMechanism: no pending vesting change");
+        require(block.timestamp >= tl.vestingExecutableAt, "BondingMechanism: timelock not expired");
+        tl.vestingDuration = tl.pendingVestingDuration;
+        tl.vestingExecutableAt = 0;
+        unchecked { tl.executions += 1; }
+        emit VestingDurationChangeExecuted(tl.vestingDuration);
     }
 }

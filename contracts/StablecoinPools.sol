@@ -264,18 +264,21 @@ contract StablecoinPools is
         IERC20Upgradeable(pool.token0).safeTransferFrom(msg.sender, address(this), amount0);
         IERC20Upgradeable(pool.token1).safeTransferFrom(msg.sender, address(this), amount1);
 
-        if (pool.totalLPTokens == 0) {
+        uint256 totalLP = pool.totalLPTokens;
+        if (totalLP == 0) {
             lpTokensMinted = _sqrt(amount0 * amount1);
         } else {
-            uint256 lp0 = (amount0 * pool.totalLPTokens) / pool.reserve0;
-            uint256 lp1 = (amount1 * pool.totalLPTokens) / pool.reserve1;
+            uint256 r0 = pool.reserve0;
+            uint256 r1 = pool.reserve1;
+            uint256 lp0 = (amount0 * totalLP) / r0;
+            uint256 lp1 = (amount1 * totalLP) / r1;
             lpTokensMinted = lp0 < lp1 ? lp0 : lp1;
         }
 
         require(lpTokensMinted >= minLpTokens, "Slippage: insufficient LP tokens");
 
         _lpBalances[poolId][msg.sender] += lpTokensMinted;
-        pool.totalLPTokens += lpTokensMinted;
+        pool.totalLPTokens = totalLP + lpTokensMinted;
         pool.reserve0 += amount0;
         pool.reserve1 += amount1;
 
@@ -293,16 +296,19 @@ contract StablecoinPools is
         require(_lpBalances[poolId][msg.sender] >= lpTokens, "Insufficient LP balance");
 
         PoolInfo storage pool = _pools[poolId];
+        uint256 totalLP = pool.totalLPTokens;
 
-        amount0 = (lpTokens * pool.reserve0) / pool.totalLPTokens;
-        amount1 = (lpTokens * pool.reserve1) / pool.totalLPTokens;
+        amount0 = (lpTokens * pool.reserve0) / totalLP;
+        amount1 = (lpTokens * pool.reserve1) / totalLP;
 
         require(amount0 >= minAmount0 && amount1 >= minAmount1, "Slippage: insufficient amounts");
 
         _lpBalances[poolId][msg.sender] -= lpTokens;
-        pool.totalLPTokens -= lpTokens;
-        pool.reserve0 -= amount0;
-        pool.reserve1 -= amount1;
+        pool.totalLPTokens = totalLP - lpTokens;
+        unchecked {
+            pool.reserve0 -= amount0;
+            pool.reserve1 -= amount1;
+        }
 
         IERC20Upgradeable(pool.token0).safeTransfer(msg.sender, amount0);
         IERC20Upgradeable(pool.token1).safeTransfer(msg.sender, amount1);
@@ -521,7 +527,8 @@ contract StablecoinPools is
         require(reserveIn > 0 && reserveOut > 0, "Empty reserves");
 
         fee = (amountIn * pool.feeBps) / BPS;
-        uint256 amountInAfterFee = amountIn - fee;
+        uint256 amountInAfterFee;
+        unchecked { amountInAfterFee = amountIn - fee; }
 
         if (pool.isStableToStable) {
             // StableSwap invariant approximation (simplified, using A=100)

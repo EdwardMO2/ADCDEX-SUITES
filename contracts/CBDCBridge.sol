@@ -435,6 +435,6 @@ contract CBDCBridge is
             revert("Daily velocity limit exceeded");
         }
 
-        _dailyMinted[token] += amount;
+        unchecked { _dailyMinted[token] += amount; }
     }
 }

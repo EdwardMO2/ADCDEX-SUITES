@@ -275,7 +275,8 @@ contract MultiPoolStakingRewards is
             poolPenalties[poolId] += penalty;
         }
 
-        uint256 amountOut = amount - penalty;
+        uint256 amountOut;
+        unchecked { amountOut = amount - penalty; }
 
         pool.totalStaked -= amount;
         userStake.amount -= amount;
