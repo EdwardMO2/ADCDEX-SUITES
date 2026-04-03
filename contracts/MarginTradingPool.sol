@@ -8,6 +8,7 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
 
 /// @title MarginTradingPool
 /// @notice Overcollateralised lending pool.  Users deposit collateral, borrow up to
@@ -35,6 +36,8 @@ contract MarginTradingPool is
     uint256 public constant BPS                    = 10_000;
     /// @dev ~3 % APY – 0.000001 per second.
     uint256 public constant INTEREST_RATE_PER_SECOND = 1e12;  // 1e12 / 1e18 = 0.000001
+    /// @dev Maximum allowed staleness for Chainlink price data.
+    uint256 public constant ORACLE_STALENESS_THRESHOLD = 1 hours;
 
     // =========================================================================
     // Structs
@@ -57,6 +60,10 @@ contract MarginTradingPool is
     address public collateralToken;
     /// @notice Token that users borrow (e.g. USDC or a synthetic).
     address public borrowToken;
+    /// @notice Chainlink price feed for the collateral token (USD-denominated).
+    address public collateralPriceFeed;
+    /// @notice Chainlink price feed for the borrow token (USD-denominated).
+    address public borrowPriceFeed;
 
     // =========================================================================
     // Events
@@ -108,16 +115,14 @@ contract MarginTradingPool is
     // =========================================================================
     // Collateral Management
     // =========================================================================
-    //
-    // ⚠️  SECURITY NOTICE — NO ORACLE INTEGRATION
-    // This pool assumes a 1:1 value ratio between collateralToken and borrowToken.
-    // If the two tokens have different market prices, the health factor calculation
-    // is economically meaningless and the pool is exposed to under-collateralisation
-    // and bad debt.
-    //
-    // TODO: Integrate a decentralised price oracle (e.g. Chainlink) for both
-    //       collateralToken and borrowToken before mainnet deployment, and
-    //       incorporate real USD values into _computeHealthFactor().
+
+    /// @notice Set Chainlink price feeds for collateral and borrow tokens.
+    /// @param _collateralFeed Chainlink AggregatorV3Interface for collateral token.
+    /// @param _borrowFeed     Chainlink AggregatorV3Interface for borrow token.
+    function setPriceFeeds(address _collateralFeed, address _borrowFeed) external onlyOwner {
+        collateralPriceFeed = _collateralFeed;
+        borrowPriceFeed = _borrowFeed;
+    }
 
     /// @notice Deposit collateral into your margin account.
     /// @param amount Amount of collateralToken to deposit.
@@ -285,13 +290,42 @@ contract MarginTradingPool is
         acct.lastInterestTime  = block.timestamp;
     }
 
-    /// @dev Compute health factor = (collateral * BPS) / (borrowed * LIQUIDATION_RATIO / BPS).
-    ///      Simplifies to: (collateral * BPS * BPS) / (borrowed * LIQUIDATION_RATIO).
+    /// @dev Fetch a Chainlink price. Returns the price scaled to 18 decimals, or 0 if unavailable.
+    function _getChainlinkPrice(address feed) internal view returns (uint256) {
+        if (feed == address(0)) return 0;
+
+        try AggregatorV3Interface(feed).latestRoundData()
+            returns (uint80 roundId, int256 answer, uint256, uint256 updatedAt, uint80 answeredInRound)
+        {
+            if (answer <= 0) return 0;
+            if (block.timestamp > updatedAt + ORACLE_STALENESS_THRESHOLD) return 0;
+            if (answeredInRound < roundId) return 0;
+
+            uint8 feedDecimals = AggregatorV3Interface(feed).decimals();
+            return uint256(answer) * (PRECISION / (10 ** feedDecimals));
+        } catch {
+            return 0;
+        }
+    }
+
+    /// @dev Compute health factor using oracle prices when available.
+    ///      health = (collateral * collateralPrice * BPS * BPS) / (borrowed * borrowPrice * LIQUIDATION_RATIO).
+    ///      Falls back to 1:1 pricing if no oracle feeds are configured.
     function _computeHealthFactor(
         uint256 collateral,
         uint256 borrowed
-    ) internal pure returns (uint256) {
+    ) internal view returns (uint256) {
         if (borrowed == 0) return type(uint256).max;
+
+        uint256 collateralPrice = _getChainlinkPrice(collateralPriceFeed);
+        uint256 borrowPrice = _getChainlinkPrice(borrowPriceFeed);
+
+        if (collateralPrice > 0 && borrowPrice > 0) {
+            // Oracle-based: (collateral * collateralPrice * BPS * BPS) / (borrowed * borrowPrice * LIQUIDATION_RATIO)
+            return (collateral * collateralPrice * BPS * BPS) / (borrowed * borrowPrice * LIQUIDATION_RATIO);
+        }
+
+        // Fallback: 1:1 pricing
         return (collateral * BPS * BPS) / (borrowed * LIQUIDATION_RATIO);
     }
 

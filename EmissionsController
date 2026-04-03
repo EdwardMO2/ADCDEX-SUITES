@@ -2,6 +2,7 @@
 pragma solidity ^0.8.23;
 
 import "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/token/ERC20/utils/SafeERC20Upgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
@@ -21,6 +22,8 @@ interface IStakingRewards {
 }
 
 contract EmissionsController is Initializable, UUPSUpgradeable, OwnableUpgradeable {
+    using SafeERC20Upgradeable for IERC20Upgradeable;
+
     IERC20Upgradeable public adcToken;
     IveADC public veADC;
     IBribeMarket public bribeMarket;
@@ -71,7 +74,7 @@ contract EmissionsController is Initializable, UUPSUpgradeable, OwnableUpgradeab
             uint256 poolReward = (emissionPerEpoch * poolVotes) / totalVotes;
             if (poolReward == 0) continue;
 
-            adcToken.transfer(address(stakingRewards), poolReward);
+            adcToken.safeTransfer(address(stakingRewards), poolReward);
             stakingRewards.notifyRewardAmount(pools[i], poolReward);
 
             totalDistributed += poolReward;

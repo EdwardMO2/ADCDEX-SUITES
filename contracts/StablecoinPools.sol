@@ -63,6 +63,8 @@ contract StablecoinPools is
     address public lzEndpoint;
     /// @dev chainId → trusted remote bridge address (packed bytes for lz)
     mapping(uint32 => bytes) public trustedRemotes;
+    /// @dev chainId → last processed nonce for replay protection
+    mapping(uint32 => uint64) public lastProcessedNonce;
 
     /// @dev ADC token address used to detect ADC pairs
     address public adcToken;
@@ -479,7 +481,7 @@ contract StablecoinPools is
     function lzReceive(
         uint16 srcChainId,
         bytes calldata srcAddress,
-        uint64, /* nonce */
+        uint64 nonce,
         bytes calldata payload
     ) external override {
         require(msg.sender == lzEndpoint, "Caller is not LZ endpoint");
@@ -488,6 +490,11 @@ contract StablecoinPools is
             "Untrusted source"
         );
 
+        // Replay protection: enforce monotonically increasing nonces
+        uint32 srcChain = uint32(srcChainId);
+        require(nonce > lastProcessedNonce[srcChain], "Stale or replayed message");
+        lastProcessedNonce[srcChain] = nonce;
+
         (bytes32 poolId, uint256 reserve0, uint256 reserve1,) =
             abi.decode(payload, (bytes32, uint256, uint256, uint256));
 
@@ -495,7 +502,7 @@ contract StablecoinPools is
         if (_pools[poolId].active) {
             _pools[poolId].reserve0 = reserve0;
             _pools[poolId].reserve1 = reserve1;
-            emit CrossChainSyncReceived(poolId, uint32(srcChainId), reserve0, reserve1);
+            emit CrossChainSyncReceived(poolId, srcChain, reserve0, reserve1);
         }
     }
 

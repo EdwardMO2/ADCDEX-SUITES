@@ -2,11 +2,13 @@
 pragma solidity ^0.8.23;
 
 import "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/token/ERC20/utils/SafeERC20Upgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 
 contract BondingTreasury is Initializable, UUPSUpgradeable, OwnableUpgradeable {
+    using SafeERC20Upgradeable for IERC20Upgradeable;
     struct Asset {
         uint256 totalReceived;
         uint256 totalWithdrawn;
@@ -31,7 +33,7 @@ contract BondingTreasury is Initializable, UUPSUpgradeable, OwnableUpgradeable {
         require(assets[token].active, "Asset not accepted");
         require(amount > 0, "Invalid amount");
 
-        IERC20Upgradeable(token).transferFrom(msg.sender, address(this), amount);
+        IERC20Upgradeable(token).safeTransferFrom(msg.sender, address(this), amount);
 
         assets[token].totalReceived += amount;
 
@@ -41,7 +43,7 @@ contract BondingTreasury is Initializable, UUPSUpgradeable, OwnableUpgradeable {
     function withdraw(address token, uint256 amount, address to) external onlyOwner {
         require(amount > 0, "Invalid amount");
 
-        IERC20Upgradeable(token).transfer(to, amount);
+        IERC20Upgradeable(token).safeTransfer(to, amount);
 
         assets[token].totalWithdrawn += amount;
 
