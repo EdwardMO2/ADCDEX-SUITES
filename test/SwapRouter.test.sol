@@ -280,6 +280,7 @@ contract SwapRouterTest {
         router.registerPool(poolId, poolAddr);
 
         TestAssert.assertAddrEq(router.pools(poolId), poolAddr, "pool registered");
+        TestAssert.assertEq(uint256(router.registeredPoolIds(1)), uint256(poolId), "registeredPoolIds tracked");
     }
 
     // -------------------------------------------------------------------------

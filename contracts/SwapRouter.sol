@@ -155,9 +155,7 @@ contract SwapRouter is
             require(poolAddr != address(0), "SwapRouter: pool not registered");
 
             // Approve the pool to spend the current hop's input token
-            IERC20Upgradeable token = IERC20Upgradeable(route.path[i]);
-            token.safeApprove(poolAddr, 0);
-            token.safeApprove(poolAddr, amountOut);
+            IERC20Upgradeable(route.path[i]).forceApprove(poolAddr, amountOut);
 
             // Execute the swap through the pool; output is sent back to this contract
             amountOut = ISwapPool(poolAddr).swap(
@@ -230,9 +228,7 @@ contract SwapRouter is
                 address poolAddr = pools[r.poolIds[j]];
                 require(poolAddr != address(0), "SwapRouter: pool not registered");
 
-                IERC20Upgradeable token = IERC20Upgradeable(r.path[j]);
-                token.safeApprove(poolAddr, 0);
-                token.safeApprove(poolAddr, hopOut);
+                IERC20Upgradeable(r.path[j]).forceApprove(poolAddr, hopOut);
 
                 hopOut = ISwapPool(poolAddr).swap(
                     r.poolIds[j],
