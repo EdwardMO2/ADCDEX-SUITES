@@ -2,12 +2,15 @@
 pragma solidity ^0.8.23;
 
 import "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/token/ERC20/utils/SafeERC20Upgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/token/ERC721/extensions/ERC721EnumerableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 
 contract veADC is Initializable, ERC721EnumerableUpgradeable, UUPSUpgradeable, OwnableUpgradeable {
+    using SafeERC20Upgradeable for IERC20Upgradeable;
+
     IERC20Upgradeable public adcToken;
     uint256 public tokenIdCounter;
     uint256 public constant MAX_LOCK_DURATION = 365 days;
@@ -39,7 +42,7 @@ contract veADC is Initializable, ERC721EnumerableUpgradeable, UUPSUpgradeable, O
         tokenId = ++tokenIdCounter;
         uint256 unlockTime = block.timestamp + duration;
 
-        adcToken.transferFrom(msg.sender, address(this), amount);
+        adcToken.safeTransferFrom(msg.sender, address(this), amount);
 
         locks[tokenId] = LockInfo(amount, unlockTime);
         _mint(msg.sender, tokenId);
@@ -55,7 +58,7 @@ contract veADC is Initializable, ERC721EnumerableUpgradeable, UUPSUpgradeable, O
         delete locks[tokenId];
         _burn(tokenId);
 
-        adcToken.transfer(msg.sender, lockInfo.amount);
+        adcToken.safeTransfer(msg.sender, lockInfo.amount);
 
         emit Unlocked(msg.sender, tokenId, lockInfo.amount);
     }

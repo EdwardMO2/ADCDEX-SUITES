@@ -9,6 +9,7 @@ import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
 import "./Interfaces/IDerivatives.sol";
+import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
 
 /// @title PerpetualsMarket
 /// @notice Perpetual futures trading with up to 10x leverage, on-chain price feed,
@@ -37,6 +38,10 @@ contract PerpetualsMarket is
     uint256 public constant BPS                   = 10_000;
     /// @dev Liquidator receives 5 % of collateral as reward.
     uint256 public constant LIQUIDATION_REWARD_BPS = 500;
+    /// @dev Maximum allowed staleness for Chainlink price data.
+    uint256 public constant ORACLE_STALENESS_THRESHOLD = 1 hours;
+    /// @dev Maximum allowed price deviation between oracle and admin price (10 %).
+    uint256 public constant MAX_PRICE_DEVIATION_BPS = 1_000;
 
     // =========================================================================
     // State
@@ -52,6 +57,8 @@ contract PerpetualsMarket is
     address public collateralToken;
     /// @notice Per-user nonce for unique position ID generation.
     mapping(address => uint256) private _positionNonces;
+    /// @notice Chainlink price feed per token for decentralised pricing.
+    mapping(address => address) public priceFeeds;
 
     // =========================================================================
     // Constructor / Initializer
@@ -86,28 +93,61 @@ contract PerpetualsMarket is
     }
 
     // =========================================================================
-    // Price Feed (simple owner-controlled, for testing and early deployment)
+    // Price Feed (Chainlink-integrated with admin fallback)
     // =========================================================================
-    //
-    // ⚠️  SECURITY NOTICE — CENTRALISED ORACLE RISK
-    // The owner can set arbitrary token prices, enabling manipulation of all
-    // positions (forced liquidations, value extraction).  This is intentional
-    // for testnet and early deployment but is CRITICAL for any mainnet launch.
-    //
-    // TODO: Replace owner-controlled prices with a decentralised oracle such as
-    //       Chainlink Data Feeds before mainnet deployment.
-    //       See https://docs.chain.link/data-feeds
 
-    /// @notice Set the oracle price for a token.
+    /// @notice Set a Chainlink price feed for a token.
+    /// @param token Token address.
+    /// @param feed  Chainlink AggregatorV3Interface address.
+    function setPriceFeed(address token, address feed) external onlyOwner {
+        require(feed != address(0), "PM: zero feed address");
+        priceFeeds[token] = feed;
+    }
+
+    /// @notice Set an admin price for a token (fallback when no Chainlink feed is configured).
     /// @param token Token address.
     /// @param price Price scaled by PRECISION (1e18).
     function setPrice(address token, uint256 price) external onlyOwner {
         require(price > 0, "PM: zero price");
+        // When a Chainlink feed exists, enforce deviation limit to prevent manipulation
+        if (priceFeeds[token] != address(0)) {
+            uint256 chainlinkPrice = _getChainlinkPrice(token);
+            if (chainlinkPrice > 0) {
+                uint256 deviation = price > chainlinkPrice
+                    ? ((price - chainlinkPrice) * BPS) / chainlinkPrice
+                    : ((chainlinkPrice - price) * BPS) / chainlinkPrice;
+                require(deviation <= MAX_PRICE_DEVIATION_BPS, "PM: price deviates too much from oracle");
+            }
+        }
         prices[token] = price;
     }
 
-    /// @dev Return the stored price for `token`.
+    /// @dev Return the Chainlink price for `token`, or 0 if unavailable/stale.
+    function _getChainlinkPrice(address token) internal view returns (uint256) {
+        address feed = priceFeeds[token];
+        if (feed == address(0)) return 0;
+
+        try AggregatorV3Interface(feed).latestRoundData()
+            returns (uint80 roundId, int256 answer, uint256, uint256 updatedAt, uint80 answeredInRound)
+        {
+            // Validate: positive price, not stale, round is complete
+            if (answer <= 0) return 0;
+            if (block.timestamp > updatedAt + ORACLE_STALENESS_THRESHOLD) return 0;
+            if (answeredInRound < roundId) return 0;
+
+            // Convert Chainlink 8-decimal price to PRECISION (1e18)
+            uint8 feedDecimals = AggregatorV3Interface(feed).decimals();
+            return uint256(answer) * (PRECISION / (10 ** feedDecimals));
+        } catch {
+            return 0;
+        }
+    }
+
+    /// @dev Return the price for `token`. Prefers Chainlink; falls back to admin price.
     function _getOraclePrice(address token) internal view returns (uint256) {
+        uint256 chainlinkPrice = _getChainlinkPrice(token);
+        if (chainlinkPrice > 0) return chainlinkPrice;
+
         uint256 p = prices[token];
         require(p > 0, "PM: no price for token");
         return p;
