@@ -56,9 +56,9 @@ contract MarginTradingPool is
 
     /// @notice Per-user margin accounts.
     mapping(address => UserMarginAccount) public accounts;
-    /// @notice Token deposited as collateral (e.g. USDC).
+    /// @notice Token deposited as collateral (e.g. a supported stablecoin).
     address public collateralToken;
-    /// @notice Token that users borrow (e.g. USDC or a synthetic).
+    /// @notice Token that users borrow (e.g. a stablecoin or a synthetic).
     address public borrowToken;
     /// @notice Chainlink price feed for the collateral token (USD-denominated).
     address public collateralPriceFeed;

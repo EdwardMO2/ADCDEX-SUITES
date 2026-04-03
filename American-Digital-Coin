@@ -32,20 +32,21 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
     bytes4 private constant INTERFACE_ID_ERC165 = 0x01ffc9a7;
     bytes4 private constant INTERFACE_ID_ERC721 = 0x80ac58cd;
 
-    IERC20Upgradeable public usdc;
+    IERC20Upgradeable public primaryStablecoin;
     AggregatorV3Interface public goldPriceFeed;
     address public treasury;
 
     mapping(address => uint256) public reserveBalances;
     address[] public supportedStablecoins;
     mapping(address => bool) public isSupportedStablecoin;
-    uint256 public merchantIncentivePool;
+    mapping(address => uint256) public merchantIncentivePools;
     uint256 public gasSubsidyPool;
     uint256 public gasSubsidyRate = 5e17;
     uint256 public voucherIdCounter = 1;
     mapping(uint256 => uint256) public voucherAmounts;
     mapping(uint256 => address) public voucherStablecoin;
     mapping(address => uint256) public liquidityPool;
+    mapping(address => uint8) public stablecoinDecimals;
 
     struct Stake { bool isStaked; uint256 stakeTime; uint256 amount; }
     struct P2PLoan {
@@ -85,9 +86,9 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
     string private _name = "American Digital Currency";
     string private _symbol = "ADC";
 
-    event Purchased(address indexed buyer, uint256 usdcAmount, uint256 adcAmount);
+    event Purchased(address indexed buyer, uint256 stablecoinAmount, uint256 adcAmount, address stablecoin);
     event CertificateOfOwnership(address indexed owner, uint256 adcAmount, uint256 indexed tokenId);
-    event Redemption(address indexed user, uint256 adcAmount, uint256 usdcAmount);
+    event Redemption(address indexed user, uint256 adcAmount, uint256 stablecoinValue);
     event MerchantPayment(address indexed from, address indexed to, uint256 amount, uint256 indexed tokenId);
     event NFTStaked(address indexed owner, uint256 indexed tokenId, uint256 amount);
     event NFTUnstaked(address indexed owner, uint256 indexed tokenId, uint256 reward);
@@ -101,41 +102,44 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
     event P2PLoanLiquidated(address indexed lender, address indexed borrower, uint256 indexed tokenId);
     event NFTRewardClaimed(address indexed owner, uint256 indexed tokenId, uint256 reward);
     event ContractUpgraded(address indexed newImplementation);
-    event ReservesFunded(address indexed funder, uint256 amount);
+    event ReservesFunded(address indexed funder, uint256 amount, address stablecoin);
     event Approval(address indexed owner, address indexed spender, uint256 value);
     event LiquidityAdded(address indexed provider, address indexed stablecoin, uint256 amount);
     event TransferNoFee(address indexed from, address indexed to, uint256 amount);
     event MerchantBonusClaimed(address indexed merchant, uint256 amount);
+    event PrimaryStablecoinUpdated(address indexed oldStablecoin, address indexed newStablecoin);
     event NFTTransfer(address indexed from, address indexed to, uint256 indexed tokenId);
     event NFTApproval(address indexed owner, address indexed approved, uint256 indexed tokenId);
     event NFTApprovalForAll(address indexed owner, address indexed operator, bool approved);
     event NFTBurned(address indexed owner, uint256 indexed tokenId);
 
-    function initialize(address _usdc, address _goldPriceFeed, address _treasury, uint256 initialReserve) public initializer {
-        require(_usdc != address(0), "Invalid USDC address");
+    function initialize(address _primaryStablecoin, address _goldPriceFeed, address _treasury, uint256 initialReserve, uint8 _decimals) public initializer {
+        require(_primaryStablecoin != address(0), "Invalid stablecoin address");
         require(_goldPriceFeed != address(0), "Invalid price feed address");
         require(_treasury != address(0), "Invalid treasury address");
         __ReentrancyGuard_init();
         __UUPSUpgradeable_init();
         __Ownable_init();
-        usdc = IERC20Upgradeable(_usdc);
+        primaryStablecoin = IERC20Upgradeable(_primaryStablecoin);
         goldPriceFeed = AggregatorV3Interface(_goldPriceFeed);
         treasury = _treasury;
+        stablecoinDecimals[_primaryStablecoin] = _decimals;
         if (initialReserve > 0) {
-            require(IERC20Upgradeable(usdc).transferFrom(msg.sender, address(this), initialReserve), "Initial reserve transfer failed");
-            reserveBalances[address(usdc)] = initialReserve * 8 / 10;
-            merchantIncentivePool = initialReserve * 2 / 10;
+            require(IERC20Upgradeable(primaryStablecoin).transferFrom(msg.sender, address(this), initialReserve), "Initial reserve transfer failed");
+            reserveBalances[address(primaryStablecoin)] = initialReserve * 8 / 10;
+            merchantIncentivePools[_primaryStablecoin] = initialReserve * 2 / 10;
         }
-        supportedStablecoins.push(_usdc);
-        isSupportedStablecoin[_usdc] = true;
+        supportedStablecoins.push(_primaryStablecoin);
+        isSupportedStablecoin[_primaryStablecoin] = true;
     }
 
-    function fundReserves(uint256 amount) external onlyOwner {
+    function fundReserves(address stablecoin, uint256 amount) external onlyOwner {
         require(amount > 0, "Amount must be greater than 0");
-        require(IERC20Upgradeable(usdc).transferFrom(msg.sender, address(this), amount), "Reserve funding failed");
-        reserveBalances[address(usdc)] += amount * 8 / 10;
-        merchantIncentivePool += amount * 2 / 10;
-        emit ReservesFunded(msg.sender, amount);
+        require(isSupportedStablecoin[stablecoin], "Unsupported stablecoin");
+        require(IERC20Upgradeable(stablecoin).transferFrom(msg.sender, address(this), amount), "Reserve funding failed");
+        reserveBalances[stablecoin] += amount * 8 / 10;
+        merchantIncentivePools[stablecoin] += amount * 2 / 10;
+        emit ReservesFunded(msg.sender, amount, stablecoin);
     }
 
     function _authorizeUpgrade(address newImplementation) internal override onlyOwner {
@@ -166,19 +170,21 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
         return _allowances[owner][spender];
     }
 
-    function buyWithUSDC(uint256 usdcAmount) external nonReentrant whenNotPaused {
+    /// @notice Purchase ADC with any registered stablecoin.
+    function buyWithStablecoin(address stablecoin, uint256 amount) external nonReentrant whenNotPaused {
+        require(isSupportedStablecoin[stablecoin], "Unsupported stablecoin");
         uint256 basePrice = getBasePrice();
-        uint256 usdcAmountScaled = usdcAmount * 10**2;
-        require(usdcAmountScaled >= (MIN_PURCHASE * basePrice) / PRECISION, "Below minimum purchase");
-        uint256 adcToMint = (usdcAmountScaled * PRECISION) / basePrice;
+        uint256 scaledAmount = _scaleToBase(amount, stablecoinDecimals[stablecoin]);
+        require(scaledAmount >= (MIN_PURCHASE * basePrice) / PRECISION, "Below minimum purchase");
+        uint256 adcToMint = (scaledAmount * PRECISION) / basePrice;
         require(_totalSupply + adcToMint <= INITIAL_MAX_SUPPLY, "Exceeds max supply");
-        require(IERC20Upgradeable(usdc).transferFrom(msg.sender, address(this), usdcAmount), "USDC transfer failed");
-        reserveBalances[address(usdc)] += usdcAmount * 8 / 10;
-        merchantIncentivePool += usdcAmount * 2 / 10;
+        require(IERC20Upgradeable(stablecoin).transferFrom(msg.sender, address(this), amount), "Stablecoin transfer failed");
+        reserveBalances[stablecoin] += amount * 8 / 10;
+        merchantIncentivePools[stablecoin] += amount * 2 / 10;
         _mintADC(msg.sender, adcToMint);
         uint256 tokenId = tokenIdCounter++;
         _mintNFT(msg.sender, tokenId);
-        emit Purchased(msg.sender, usdcAmount, adcToMint);
+        emit Purchased(msg.sender, amount, adcToMint, stablecoin);
         emit CertificateOfOwnership(msg.sender, adcToMint, tokenId);
     }
 
@@ -192,13 +198,14 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
     function claimGasSubsidy() external whenNotPaused {
         require(gasSubsidyPool >= gasSubsidyRate, "Insufficient gas subsidy pool");
         gasSubsidyPool -= gasSubsidyRate;
-        require(IERC20Upgradeable(usdc).transfer(msg.sender, gasSubsidyRate), "Gas subsidy transfer failed");
+        require(IERC20Upgradeable(primaryStablecoin).transfer(msg.sender, gasSubsidyRate), "Gas subsidy transfer failed");
         emit GasSubsidyClaimed(msg.sender, gasSubsidyRate);
     }
 
     function swapADCForStablecoin(uint256 adcAmount, address stablecoin) external whenNotPaused {
+        require(isSupportedStablecoin[stablecoin], "Unsupported stablecoin");
         require(_nftBalances[msg.sender] > 0 && _balances[msg.sender] >= adcAmount, "Insufficient ADC or NFT balance");
-        uint256 stablecoinAmount = (adcAmount * getBasePrice()) / PRECISION / 10**2;
+        uint256 stablecoinAmount = _scaleFromBase(adcAmount, getBasePrice(), stablecoinDecimals[stablecoin]);
         require(liquidityPool[stablecoin] >= stablecoinAmount, "Insufficient liquidity");
         _burnADC(msg.sender, adcAmount);
         liquidityPool[stablecoin] -= stablecoinAmount;
@@ -215,15 +222,17 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
     }
 
     /// @notice Add a supported stablecoin (owner-only).
-    function addSupportedStablecoin(address stablecoin) external onlyOwner {
+    function addSupportedStablecoin(address stablecoin, uint8 decimals_) external onlyOwner {
         require(stablecoin != address(0), "Invalid stablecoin");
         require(!isSupportedStablecoin[stablecoin], "Already supported");
         require(supportedStablecoins.length < MAX_SUPPORTED_STABLECOINS, "Max stablecoins reached");
         supportedStablecoins.push(stablecoin);
         isSupportedStablecoin[stablecoin] = true;
+        stablecoinDecimals[stablecoin] = decimals_;
     }
 
     function redeemADC(uint256 adcAmount, address stablecoin) external nonReentrant whenNotPaused {
+        require(isSupportedStablecoin[stablecoin], "Unsupported stablecoin");
         uint256 currentDay = block.timestamp / 86400;
         if (lastRedemptionReset[msg.sender] / 86400 != currentDay) {
             dailyRedemptionVolume[msg.sender][currentDay] = 0;
@@ -234,12 +243,12 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
         dailyRedemptionVolume[msg.sender][currentDay] += adcAmount;
         uint256 reserveValue = getTotalReserveValue();
         uint256 basePrice = _getBasePriceWithReserve(reserveValue);
-        uint256 usdcValue = (adcAmount * basePrice) / PRECISION / 10**2;
-        require(reserveBalances[stablecoin] >= usdcValue && _getReserveHealth(reserveValue, basePrice) >= RESERVE_THRESHOLD, "Insufficient reserves or health");
+        uint256 stablecoinValue = _scaleFromBase(adcAmount, basePrice, stablecoinDecimals[stablecoin]);
+        require(reserveBalances[stablecoin] >= stablecoinValue && _getReserveHealth(reserveValue, basePrice) >= RESERVE_THRESHOLD, "Insufficient reserves or health");
         _burnADC(msg.sender, adcAmount);
-        reserveBalances[stablecoin] -= usdcValue;
-        require(IERC20Upgradeable(stablecoin).transfer(msg.sender, usdcValue), "Redemption transfer failed");
-        emit Redemption(msg.sender, adcAmount, usdcValue);
+        reserveBalances[stablecoin] -= stablecoinValue;
+        require(IERC20Upgradeable(stablecoin).transfer(msg.sender, stablecoinValue), "Redemption transfer failed");
+        emit Redemption(msg.sender, adcAmount, stablecoinValue);
     }
 
     function batchAddMerchants(address[] calldata merchants) external onlyOwner {
@@ -261,8 +270,9 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
         emit MerchantBonusClaimed(msg.sender, MERCHANT_BONUS);
     }
 
-    function paymentToMerchant(address merchant, uint256 amount, uint256 tokenId) external whenNotPaused {
+    function paymentToMerchant(address merchant, uint256 amount, uint256 tokenId, address stablecoin) external whenNotPaused {
         require(whitelistedMerchants[merchant] && _owners[tokenId] == msg.sender, "Invalid merchant or token ownership");
+        require(isSupportedStablecoin[stablecoin], "Unsupported stablecoin");
         uint256 maxPayment = (getTotalReserveValue() * MAX_PAYMENT_CAP) / PRECISION;
         require(amount <= maxPayment, "Exceeds max payment cap");
         uint256 fee = (amount * MERCHANT_PAYMENT_FEE) / PRECISION;
@@ -271,9 +281,9 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
         _transfer(msg.sender, merchant, netAmount);
         _distributeFees(fee);
         uint256 incentive = (netAmount * MERCHANT_INCENTIVE_RATE) / PRECISION;
-        if (merchantIncentivePool >= incentive) {
-            merchantIncentivePool -= incentive;
-            require(IERC20Upgradeable(usdc).transfer(merchant, incentive), "Incentive transfer failed");
+        if (merchantIncentivePools[stablecoin] >= incentive) {
+            merchantIncentivePools[stablecoin] -= incentive;
+            require(IERC20Upgradeable(stablecoin).transfer(merchant, incentive), "Incentive transfer failed");
         }
         emit MerchantPayment(msg.sender, merchant, netAmount, tokenId);
     }
@@ -420,6 +430,37 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
     function _getReserveHealth(uint256 totalReserveValue, uint256 basePrice) internal view returns (uint256) {
         uint256 supplyValue = (_totalSupply * basePrice) / PRECISION / 10**2;
         return supplyValue > 0 ? (totalReserveValue * PRECISION / supplyValue) : PRECISION;
+    }
+
+    /// @notice Scale a stablecoin amount to 8-decimal base representation (price uses 10**2 = 6→8 for USDC).
+    ///         For 6-decimal tokens: amount * 10**2 = 8-digit base.
+    ///         For 18-decimal tokens: amount / 10**10 = 8-digit base.
+    function _scaleToBase(uint256 amount, uint8 tokenDecimals) internal pure returns (uint256) {
+        if (tokenDecimals <= 8) {
+            return amount * (10 ** (8 - tokenDecimals));
+        } else {
+            return amount / (10 ** (tokenDecimals - 8));
+        }
+    }
+
+    /// @notice Convert ADC amount (18 decimals) at basePrice into stablecoin-native units.
+    function _scaleFromBase(uint256 adcAmount, uint256 basePrice, uint8 tokenDecimals) internal pure returns (uint256) {
+        // First compute value in 8-decimal base: (adcAmount * basePrice) / PRECISION
+        // Then convert to token-native decimals
+        uint256 baseValue = (adcAmount * basePrice) / PRECISION;
+        if (tokenDecimals <= 8) {
+            return baseValue / (10 ** (8 - tokenDecimals));
+        } else {
+            return baseValue * (10 ** (tokenDecimals - 8));
+        }
+    }
+
+    /// @notice Update the primary stablecoin used for gas subsidies (owner-only).
+    function setPrimaryStablecoin(address stablecoin) external onlyOwner {
+        require(isSupportedStablecoin[stablecoin], "Unsupported stablecoin");
+        address old = address(primaryStablecoin);
+        primaryStablecoin = IERC20Upgradeable(stablecoin);
+        emit PrimaryStablecoinUpdated(old, stablecoin);
     }
 
     function _mintADC(address to, uint256 value) internal {
