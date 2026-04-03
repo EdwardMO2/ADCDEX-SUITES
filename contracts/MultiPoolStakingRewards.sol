@@ -50,6 +50,9 @@ contract MultiPoolStakingRewards is
     /// @notice Maximum NFT boost (2 500 BPS = 25 %, achieved with ≥ 5 NFTs).
     uint256 public constant MAX_NFT_BOOST_BPS = 2500;
 
+    /// @notice Maximum number of pools that can be claimed in a single batch.
+    uint256 public constant MAX_BATCH_CLAIM_POOLS = 20;
+
     /// @notice Basis-points denominator (10 000 = 100 %).
     uint256 public constant BPS_DENOMINATOR = 10_000;
 
@@ -314,7 +317,7 @@ contract MultiPoolStakingRewards is
     /// @param poolIds Array of pool IDs to claim from.
     function claimMultiple(uint256[] calldata poolIds) external nonReentrant {
         uint256 len = poolIds.length;
-        require(len > 0 && len <= 20, "Invalid pool count");
+        require(len > 0 && len <= MAX_BATCH_CLAIM_POOLS, "Invalid pool count");
         for (uint256 i = 0; i < len; ) {
             uint256 poolId = poolIds[i];
             if (poolId >= pools.length) revert InvalidPool(poolId);

@@ -27,6 +27,7 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
     uint256 private constant MAX_SUPPORTED_STABLECOINS = 20;
     uint256 private constant MAX_NFT_SUPPLY = 100_000;
     uint256 private constant LOAN_MAX_DURATION = 90 days;
+    uint256 private constant NFT_BASE_VALUE = 1e18;
 
     bytes4 private constant INTERFACE_ID_ERC165 = 0x01ffc9a7;
     bytes4 private constant INTERFACE_ID_ERC721 = 0x80ac58cd;
@@ -371,10 +372,9 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
         require(_owners[tokenId] == msg.sender, "Not token owner");
         require(!stakedNFTs[tokenId].isStaked, "NFT is staked");
         uint256 timeHeld = block.timestamp - nftMintTime[tokenId];
-        // Use the staked amount recorded at mint (1e18 per NFT as base) to prevent
-        // exploit where user claims on multiple NFTs using entire balance
-        uint256 nftBaseValue = 1e18;
-        uint256 reward = (nftBaseValue * BASE_PASSIVE_YIELD * timeHeld) / (SECONDS_PER_YEAR * PRECISION);
+        // Use a fixed per-NFT base value to prevent exploit where user claims
+        // on multiple NFTs using entire balance
+        uint256 reward = (NFT_BASE_VALUE * BASE_PASSIVE_YIELD * timeHeld) / (SECONDS_PER_YEAR * PRECISION);
         require(_totalSupply + reward <= INITIAL_MAX_SUPPLY, "Exceeds max supply");
         nftMintTime[tokenId] = block.timestamp;
         _mintADC(msg.sender, reward);
