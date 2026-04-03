@@ -40,6 +40,7 @@ contract SwapRouter is
         bytes32[] poolIds;       // Pool ID for each hop (length = path.length - 1)
         uint256   amountIn;
         uint256   minAmountOut;
+        uint256[] perHopMinOut;  // P1-4: minimum output per hop (optional, length = path.length - 1)
     }
 
     struct SplitRoute {
@@ -127,7 +128,8 @@ contract SwapRouter is
     /// @notice Execute a multi-hop swap along a single route.
     /// @dev    Each hop is routed through the pool contract registered for the
     ///         corresponding poolId.  The pool's own swap logic (AMM curve, fees,
-    ///         slippage) is applied on each hop.
+    ///         slippage) is applied on each hop.  Per-hop slippage protection is
+    ///         enforced when perHopMinOut is provided.
     /// @param route        The route to execute.
     /// @param minAmountOut Minimum acceptable output; reverts if not met.
     /// @return amountOut   Actual output amount.
@@ -140,6 +142,12 @@ contract SwapRouter is
         require(hops - 1 <= MAX_HOPS, "SwapRouter: too many hops");
         require(route.poolIds.length == hops - 1, "SwapRouter: poolIds length mismatch");
         require(route.amountIn > 0, "SwapRouter: zero amountIn");
+
+        // Validate per-hop slippage array if provided
+        bool hasPerHopSlippage = route.perHopMinOut.length > 0;
+        if (hasPerHopSlippage) {
+            require(route.perHopMinOut.length == hops - 1, "SwapRouter: perHopMinOut length mismatch");
+        }
 
         // Pull tokenIn from caller
         IERC20Upgradeable(route.path[0]).safeTransferFrom(
@@ -157,12 +165,15 @@ contract SwapRouter is
             // Approve the pool to spend the current hop's input token
             IERC20Upgradeable(route.path[i]).forceApprove(poolAddr, amountOut);
 
+            // P1-4: Per-hop slippage protection
+            uint256 hopMinOut = hasPerHopSlippage ? route.perHopMinOut[i] : 0;
+
             // Execute the swap through the pool; output is sent back to this contract
             amountOut = ISwapPool(poolAddr).swap(
                 route.poolIds[i],
                 route.path[i],
                 amountOut,
-                0,                // per-hop slippage deferred to final check
+                hopMinOut,
                 address(this)
             );
 
@@ -317,11 +328,15 @@ contract SwapRouter is
         bytes32[] memory pids = new bytes32[](1);
         pids[0] = bestPoolId;
 
+        uint256[] memory perHopMin = new uint256[](1);
+        perHopMin[0] = bestOutput;
+
         route = Route({
             path:         path,
             poolIds:      pids,
             amountIn:     amountIn,
-            minAmountOut: bestOutput
+            minAmountOut: bestOutput,
+            perHopMinOut: perHopMin
         });
     }
 

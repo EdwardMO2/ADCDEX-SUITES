@@ -199,7 +199,19 @@ contract ADCDEX is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeable
 
     function proposeRebalance(address pair, uint256 targetReserve0, uint256 targetReserve1) external whenNotPaused {
         require(targetReserve0 > 0 && targetReserve1 > 0, "Invalid targets");
-        require(veADC(governor.veADCToken()).balanceOf(msg.sender) >= minProposalThreshold, "Insufficient veADC");
+        // Use actual voting power instead of NFT balance for proposal threshold
+        veADC veToken = veADC(governor.veADCToken());
+        uint256 veBalance = veToken.balanceOf(msg.sender);
+        require(veBalance > 0, "No veADC tokens");
+        // Cap iteration to prevent gas limit issues
+        uint256 maxTokens = veBalance > 50 ? 50 : veBalance;
+        uint256 totalPower = 0;
+        for (uint256 i = 0; i < maxTokens; ) {
+            uint256 tokenId = veToken.tokenOfOwnerByIndex(msg.sender, i);
+            totalPower += veToken.getVotingPower(tokenId);
+            unchecked { ++i; }
+        }
+        require(totalPower >= minProposalThreshold, "Insufficient veADC voting power");
         require(proposals[proposalCount].deadline < block.timestamp, "Active proposal exists");
 
         proposals[proposalCount] = RebalanceProposal({
@@ -217,10 +229,32 @@ contract ADCDEX is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeable
     }
 
     function vote(uint256 proposalId, bool support) external whenNotPaused {
-        uint256 weight = veADC(governor.veADCToken()).balanceOf(msg.sender);
-        require(weight > 0, "No voting power");
+        // P0-5: Weight voting by LP position exposure, not just veADC NFT count.
+        //       Use veADC voting power (time-weighted) for governance weight.
+        veADC veToken = veADC(governor.veADCToken());
+        uint256 veBalance = veToken.balanceOf(msg.sender);
+        require(veBalance > 0, "No voting power");
         require(block.timestamp < proposals[proposalId].deadline, "Voting closed");
         require(!hasVoted[proposalId][msg.sender], "Already voted");
+
+        // Calculate actual voting power from all veADC positions (capped for gas safety)
+        uint256 weight = 0;
+        uint256 maxTokens = veBalance > 50 ? 50 : veBalance;
+        for (uint256 i = 0; i < maxTokens; ) {
+            uint256 tokenId = veToken.tokenOfOwnerByIndex(msg.sender, i);
+            weight += veToken.getVotingPower(tokenId);
+            unchecked { ++i; }
+        }
+        require(weight > 0, "No active voting power");
+
+        // Weight by LP position exposure in the proposed pool
+        PoolState storage state = poolStates[proposals[proposalId].pair];
+        uint256 lpBalance = state.lpBalances[msg.sender];
+        if (lpBalance > 0 && state.totalLPTokens > 0) {
+            // Boost voting power proportional to LP exposure (up to 2x)
+            uint256 lpShare = (lpBalance * 1e18) / state.totalLPTokens;
+            weight = weight + (weight * lpShare) / 1e18;
+        }
 
         hasVoted[proposalId][msg.sender] = true;
 

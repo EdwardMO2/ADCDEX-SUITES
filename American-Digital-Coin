@@ -28,12 +28,16 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
     uint256 private constant MAX_NFT_SUPPLY = 100_000;
     uint256 private constant LOAN_MAX_DURATION = 90 days;
     uint256 private constant NFT_BASE_VALUE = 1e18;
+    /// @dev Maximum allowed deviation between Chainlink and fallback price (10%)
+    uint256 private constant MAX_ORACLE_DEVIATION = 10e16;
 
     bytes4 private constant INTERFACE_ID_ERC165 = 0x01ffc9a7;
     bytes4 private constant INTERFACE_ID_ERC721 = 0x80ac58cd;
 
     IERC20Upgradeable public primaryStablecoin;
     AggregatorV3Interface public goldPriceFeed;
+    /// @notice Fallback oracle for ADC pricing when Chainlink is unavailable
+    AggregatorV3Interface public fallbackPriceFeed;
     address public treasury;
 
     mapping(address => uint256) public reserveBalances;
@@ -47,6 +51,10 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
     mapping(uint256 => address) public voucherStablecoin;
     mapping(address => uint256) public liquidityPool;
     mapping(address => uint8) public stablecoinDecimals;
+    /// @dev Cached total reserve value, updated on reserve-changing operations
+    uint256 public cachedTotalReserveValue;
+    /// @dev Accumulated fees available for withdrawal (separate from reserves)
+    uint256 public accumulatedFees;
 
     struct Stake { bool isStaked; uint256 stakeTime; uint256 amount; }
     struct P2PLoan {
@@ -140,6 +148,7 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
         require(IERC20Upgradeable(stablecoin).transferFrom(msg.sender, address(this), amount), "Reserve funding failed");
         reserveBalances[stablecoin] += amount * 8 / 10;
         merchantIncentivePools[stablecoin] += amount * 2 / 10;
+        cachedTotalReserveValue = getTotalReserveValue();
         emit ReservesFunded(msg.sender, amount, stablecoin);
     }
 
@@ -203,7 +212,7 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
         emit GasSubsidyClaimed(msg.sender, gasSubsidyRate);
     }
 
-    function swapADCForStablecoin(uint256 adcAmount, address stablecoin) external whenNotPaused {
+    function swapADCForStablecoin(uint256 adcAmount, address stablecoin) external nonReentrant whenNotPaused {
         require(isSupportedStablecoin[stablecoin], "Unsupported stablecoin");
         require(_nftBalances[msg.sender] > 0 && _balances[msg.sender] >= adcAmount, "Insufficient ADC or NFT balance");
         uint256 stablecoinAmount = _scaleFromBase(adcAmount, getBasePrice(), stablecoinDecimals[stablecoin]);
@@ -414,6 +423,11 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
         return total;
     }
 
+    /// @notice Refresh the cached total reserve value (gas optimization for reads).
+    function refreshReserveCache() external {
+        cachedTotalReserveValue = getTotalReserveValue();
+    }
+
     function getReserveHealth() public view returns (uint256) {
         uint256 reserveValue = getTotalReserveValue();
         uint256 basePrice = _getBasePriceWithReserve(reserveValue);
@@ -421,12 +435,49 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
     }
 
     function _getBasePriceWithReserve(uint256 totalReserveValue) internal view returns (uint256) {
-        (, int256 goldPrice,, uint256 updatedAt,) = goldPriceFeed.latestRoundData();
-        require(goldPrice > 0, "Invalid gold price");
-        require(block.timestamp <= updatedAt + ORACLE_STALENESS_THRESHOLD, "Oracle data stale");
+        int256 goldPrice = _getOraclePrice();
         uint256 goldBase = uint256(goldPrice) * 16;
         if (totalReserveValue == 0 || _totalSupply == 0) return goldBase;
         return (goldBase * totalReserveValue * 10**2 * PRECISION) / (_totalSupply * PRECISION);
+    }
+
+    /// @dev Get gold price from primary oracle, falling back to secondary if primary is stale or unavailable.
+    function _getOraclePrice() internal view returns (int256 goldPrice) {
+        bool primaryOk;
+        (primaryOk, goldPrice) = _tryGetOraclePrice(goldPriceFeed);
+        if (primaryOk) {
+            // Cross-check with fallback if available
+            if (address(fallbackPriceFeed) != address(0)) {
+                (bool fallbackOk, int256 fallbackPrice) = _tryGetOraclePrice(fallbackPriceFeed);
+                if (fallbackOk && fallbackPrice > 0) {
+                    require(goldPrice > 0, "Invalid primary oracle price");
+                    // Ensure prices don't deviate by more than MAX_ORACLE_DEVIATION
+                    uint256 diff = goldPrice > fallbackPrice
+                        ? uint256(goldPrice - fallbackPrice)
+                        : uint256(fallbackPrice - goldPrice);
+                    require(
+                        diff * PRECISION / uint256(goldPrice) <= MAX_ORACLE_DEVIATION,
+                        "Oracle price deviation too high"
+                    );
+                }
+            }
+            return goldPrice;
+        }
+        // Primary failed, try fallback
+        require(address(fallbackPriceFeed) != address(0), "No fallback oracle configured");
+        (bool fallbackOk, int256 fallbackPrice) = _tryGetOraclePrice(fallbackPriceFeed);
+        require(fallbackOk, "Both oracles failed");
+        return fallbackPrice;
+    }
+
+    /// @dev Attempt to read oracle price, returning (success, price).
+    function _tryGetOraclePrice(AggregatorV3Interface feed) internal view returns (bool, int256) {
+        try feed.latestRoundData() returns (uint80, int256 price, uint256, uint256 updatedAt, uint80) {
+            if (price > 0 && block.timestamp <= updatedAt + ORACLE_STALENESS_THRESHOLD) {
+                return (true, price);
+            }
+        } catch {}
+        return (false, 0);
     }
 
     function _getReserveHealth(uint256 totalReserveValue, uint256 basePrice) internal view returns (uint256) {
@@ -447,15 +498,16 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
     }
 
     /// @notice Convert ADC amount (18 decimals) at basePrice into stablecoin-native units.
+    ///         Division ordering fixed to minimize precision loss: multiply before dividing.
     function _scaleFromBase(uint256 adcAmount, uint256 basePrice, uint8 tokenDecimals) internal pure returns (uint256) {
         require(tokenDecimals > 0 && tokenDecimals <= 18, "Invalid decimals");
-        // First compute value in 8-decimal base: (adcAmount * basePrice) / PRECISION
-        // Then convert to token-native decimals
-        uint256 baseValue = (adcAmount * basePrice) / PRECISION;
+        // Compute value in token-native decimals, multiplying before dividing to reduce precision loss
         if (tokenDecimals <= 8) {
-            return baseValue / (10 ** (8 - tokenDecimals));
+            // baseValue = (adcAmount * basePrice) / (PRECISION * 10^(8 - tokenDecimals))
+            return (adcAmount * basePrice) / (PRECISION * (10 ** (8 - tokenDecimals)));
         } else {
-            return baseValue * (10 ** (tokenDecimals - 8));
+            // baseValue = (adcAmount * basePrice * 10^(tokenDecimals - 8)) / PRECISION
+            return (adcAmount * basePrice * (10 ** (tokenDecimals - 8))) / PRECISION;
         }
     }
 
@@ -466,6 +518,35 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
         primaryStablecoin = IERC20Upgradeable(stablecoin);
         emit PrimaryStablecoinUpdated(old, stablecoin);
     }
+
+    /// @notice Set a fallback oracle for ADC pricing (owner-only).
+    function setFallbackOracle(address _fallbackFeed) external onlyOwner {
+        require(_fallbackFeed != address(0), "Invalid fallback feed");
+        fallbackPriceFeed = AggregatorV3Interface(_fallbackFeed);
+    }
+
+    /// @notice Withdraw accumulated fees to treasury (owner-only).
+    ///         Fees are separate from protocol reserves.
+    function withdrawFees(address stablecoin, uint256 amount) external onlyOwner {
+        require(amount > 0, "Zero amount");
+        require(amount <= accumulatedFees, "Exceeds accumulated fees");
+        accumulatedFees -= amount;
+        require(IERC20Upgradeable(stablecoin).transfer(treasury, amount), "Fee transfer failed");
+    }
+
+    /// @notice Pause the contract (owner-only).
+    function pause() external onlyOwner {
+        paused = true;
+        emit Paused(true);
+    }
+
+    /// @notice Unpause the contract (owner-only).
+    function unpause() external onlyOwner {
+        paused = false;
+        emit Paused(false);
+    }
+
+    event Paused(bool isPaused);
 
     function _mintADC(address to, uint256 value) internal {
         _totalSupply += value;
@@ -502,7 +583,9 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
         uint256 subsidyShare = fee * 20e16 / PRECISION;
         gasSubsidyPool += subsidyShare;
         if (gasSubsidyPool > MAX_GAS_POOL) gasSubsidyPool = MAX_GAS_POOL;
-        feePool += (fee - subsidyShare);
+        uint256 feeRemainder = fee - subsidyShare;
+        feePool += feeRemainder;
+        accumulatedFees += feeRemainder;
     }
 
     // =========================================================================

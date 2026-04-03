@@ -40,10 +40,16 @@ contract StablecoinPools is
     uint256 public constant MIN_FEE_BPS = 1;
     /// @dev Slippage threshold above which fees are dynamically increased
     uint256 public constant SLIPPAGE_THRESHOLD_BPS = 10; // 0.1 %
-    /// @dev Amplification coefficient for the StableSwap invariant (A factor)
-    uint256 public constant A_FACTOR = 100;
+    /// @dev Default amplification coefficient for the StableSwap invariant
+    uint256 public constant DEFAULT_A_FACTOR = 100;
     /// @dev BPS denominator
     uint256 public constant BPS = 10_000;
+    /// @dev TWAP ring buffer size
+    uint256 public constant TWAP_BUFFER_SIZE = 24;
+    /// @dev Internal precision for decimal normalization (18 decimals)
+    uint256 public constant PRECISION = 1e18;
+    /// @dev Maximum reserve change ratio per cross-chain sync (200% = 2x)
+    uint256 public constant MAX_RESERVE_CHANGE_BPS = 20_000;
 
     // =========================================================================
     // State
@@ -70,6 +76,43 @@ contract StablecoinPools is
     address public adcToken;
     /// @dev Governance timelock – only it may upgrade or change fees
     address public timelock;
+    /// @dev Governance-configurable amplification factor for StableSwap
+    uint256 public aFactor;
+    /// @dev Chainlink oracle for ADC price validation
+    address public adcPriceFeed;
+
+    // =========================================================================
+    // Fee Accounting (P1-3: separate fees from reserves)
+    // =========================================================================
+
+    /// @dev poolId → accumulated fees for token0
+    mapping(bytes32 => uint256) public accumulatedFees0;
+    /// @dev poolId → accumulated fees for token1
+    mapping(bytes32 => uint256) public accumulatedFees1;
+
+    // =========================================================================
+    // TWAP Ring Buffer (P1-1)
+    // =========================================================================
+
+    struct TWAPObservation {
+        uint256 timestamp;
+        uint256 price0Cumulative;  // reserve1/reserve0 * PRECISION cumulative
+        uint256 price1Cumulative;  // reserve0/reserve1 * PRECISION cumulative
+    }
+
+    /// @dev poolId → TWAP observations ring buffer
+    mapping(bytes32 => TWAPObservation[TWAP_BUFFER_SIZE]) public twapObservations;
+    /// @dev poolId → current write index in TWAP ring buffer
+    mapping(bytes32 => uint256) public twapIndex;
+    /// @dev poolId → number of observations written (caps at TWAP_BUFFER_SIZE)
+    mapping(bytes32 => uint256) public twapCount;
+
+    // =========================================================================
+    // Token Pair Index (P2-2)
+    // =========================================================================
+
+    /// @dev tokenPairHash → poolId for route discovery
+    mapping(bytes32 => bytes32) public pairToPoolId;
 
     // =========================================================================
     // Initializer
@@ -95,6 +138,7 @@ contract StablecoinPools is
         adcToken = _adcToken;
         lzEndpoint = _lzEndpoint;
         timelock = _timelock;
+        aFactor = DEFAULT_A_FACTOR;
 
         // Register the 7 major stablecoins at launch (addresses are chain-specific
         // placeholders – governance will call registerStablecoin post-deploy)
@@ -221,6 +265,8 @@ contract StablecoinPools is
             active: true
         });
         _poolList.push(poolId);
+        // Index pool by token pair for route discovery (P2-2)
+        pairToPoolId[poolId] = poolId;
 
         emit PoolCreated(poolId, token0, token1, effectiveFee, isStableToStable);
     }
@@ -342,27 +388,55 @@ contract StablecoinPools is
         bool zeroForOne = tokenIn == pool.token0;
         require(zeroForOne || tokenIn == pool.token1, "Invalid tokenIn");
 
+        // Decimal normalization: normalize amounts to 18 decimals for calculations
+        uint8 decimalsIn = _getTokenDecimals(tokenIn);
+        address tokenOut = zeroForOne ? pool.token1 : pool.token0;
+        uint8 decimalsOut = _getTokenDecimals(tokenOut);
+
         uint256 reserveIn = zeroForOne ? pool.reserve0 : pool.reserve1;
         uint256 reserveOut = zeroForOne ? pool.reserve1 : pool.reserve0;
 
         IERC20Upgradeable(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
 
-        uint256 fee;
-        (amountOut, fee) = _calculateSwap(pool, amountIn, reserveIn, reserveOut);
+        // Normalize to 18 decimals for swap calculation
+        uint256 normalizedAmountIn = _normalize(amountIn, decimalsIn);
+        uint256 normalizedReserveIn = _normalize(reserveIn, decimalsIn);
+        uint256 normalizedReserveOut = _normalize(reserveOut, decimalsOut);
+
+        uint256 normalizedFee;
+        uint256 normalizedAmountOut;
+        (normalizedAmountOut, normalizedFee) = _calculateSwap(
+            pool, normalizedAmountIn, normalizedReserveIn, normalizedReserveOut
+        );
+
+        // Denormalize back to native token decimals
+        amountOut = _denormalize(normalizedAmountOut, decimalsOut);
+        uint256 fee = _denormalize(normalizedFee, decimalsIn);
+
+        // Oracle price validation for ADC pairs (P0-4)
+        if (adcPriceFeed != address(0) && (pool.token0 == adcToken || pool.token1 == adcToken)) {
+            _validateSwapPrice(amountIn, amountOut, decimalsIn, decimalsOut);
+        }
 
         require(amountOut >= minAmountOut, "Slippage: amountOut too low");
         require(amountOut < reserveOut, "Insufficient liquidity");
 
-        address tokenOut = zeroForOne ? pool.token1 : pool.token0;
-        IERC20Upgradeable(tokenOut).safeTransfer(recipient, amountOut);
-
+        // Separate fee tracking from reserves (P1-3)
+        uint256 amountInAfterFee = amountIn - fee;
         if (zeroForOne) {
-            pool.reserve0 += amountIn;
+            pool.reserve0 += amountInAfterFee;
             pool.reserve1 -= amountOut;
+            accumulatedFees0[poolId] += fee;
         } else {
-            pool.reserve1 += amountIn;
+            pool.reserve1 += amountInAfterFee;
             pool.reserve0 -= amountOut;
+            accumulatedFees1[poolId] += fee;
         }
+
+        // Update TWAP observation (P1-1)
+        _updateTWAP(poolId, pool);
+
+        IERC20Upgradeable(tokenOut).safeTransfer(recipient, amountOut);
 
         emit Swapped(poolId, msg.sender, tokenIn, amountIn, amountOut, fee);
     }
@@ -500,6 +574,31 @@ contract StablecoinPools is
 
         // Update reserves from remote if the pool exists (sync only)
         if (_pools[poolId].active) {
+            // P0-3: Reserve bounds validation – prevent extreme reserve changes
+            uint256 currentReserve0 = _pools[poolId].reserve0;
+            uint256 currentReserve1 = _pools[poolId].reserve1;
+            if (currentReserve0 > 0 && currentReserve1 > 0) {
+                // Ensure new reserves are within MAX_RESERVE_CHANGE_BPS of current (upper bound)
+                require(
+                    reserve0 <= (currentReserve0 * MAX_RESERVE_CHANGE_BPS) / BPS,
+                    "Reserve0 change too large"
+                );
+                require(
+                    reserve1 <= (currentReserve1 * MAX_RESERVE_CHANGE_BPS) / BPS,
+                    "Reserve1 change too large"
+                );
+                // Lower bound: reserves cannot drop below 50% of current
+                require(
+                    reserve0 >= currentReserve0 / 2,
+                    "Reserve0 drop too large"
+                );
+                require(
+                    reserve1 >= currentReserve1 / 2,
+                    "Reserve1 drop too large"
+                );
+                // Ensure reserves don't drop to zero if they were non-zero
+                require(reserve0 > 0 && reserve1 > 0, "Reserves cannot drop to zero");
+            }
             _pools[poolId].reserve0 = reserve0;
             _pools[poolId].reserve1 = reserve1;
             emit CrossChainSyncReceived(poolId, srcChain, reserve0, reserve1);
@@ -520,11 +619,74 @@ contract StablecoinPools is
         _unpause();
     }
 
+    /// @notice Withdraw accumulated swap fees for a pool (timelock-only, P1-3).
+    function withdrawFees(bytes32 poolId, address recipient) external onlyTimelock poolExists(poolId) {
+        require(recipient != address(0), "Zero recipient");
+        PoolInfo storage pool = _pools[poolId];
+
+        uint256 fees0 = accumulatedFees0[poolId];
+        uint256 fees1 = accumulatedFees1[poolId];
+
+        if (fees0 > 0) {
+            accumulatedFees0[poolId] = 0;
+            IERC20Upgradeable(pool.token0).safeTransfer(recipient, fees0);
+        }
+        if (fees1 > 0) {
+            accumulatedFees1[poolId] = 0;
+            IERC20Upgradeable(pool.token1).safeTransfer(recipient, fees1);
+        }
+    }
+
+    /// @notice Set the A_Factor for StableSwap invariant (governance-configurable, P2-3).
+    function setAFactor(uint256 newAFactor) external onlyTimelock {
+        require(newAFactor >= 1 && newAFactor <= 10_000, "A factor out of range");
+        aFactor = newAFactor;
+    }
+
+    /// @notice Set the oracle price feed for ADC price validation (P0-4).
+    function setAdcPriceFeed(address _priceFeed) external onlyOwner {
+        adcPriceFeed = _priceFeed;
+    }
+
+    /// @notice Get the TWAP price for a pool over the observation window (P1-1).
+    function getTWAP(bytes32 poolId) external view returns (uint256 price0TWAP, uint256 price1TWAP) {
+        uint256 count = twapCount[poolId];
+        require(count >= 2, "Insufficient TWAP observations");
+
+        uint256 currentIdx = twapIndex[poolId];
+        uint256 oldestIdx = count >= TWAP_BUFFER_SIZE
+            ? currentIdx  // ring buffer is full, oldest is at current write position
+            : 0;          // ring buffer not yet full, oldest is at 0
+
+        // Get most recent observation (one before current write index)
+        uint256 newestIdx;
+        if (currentIdx == 0) {
+            newestIdx = count >= TWAP_BUFFER_SIZE ? TWAP_BUFFER_SIZE - 1 : count - 1;
+        } else {
+            newestIdx = currentIdx - 1;
+        }
+
+        TWAPObservation storage oldest = twapObservations[poolId][oldestIdx];
+        TWAPObservation storage newest = twapObservations[poolId][newestIdx];
+
+        uint256 elapsed = newest.timestamp - oldest.timestamp;
+        require(elapsed > 0, "Zero TWAP elapsed time");
+
+        price0TWAP = (newest.price0Cumulative - oldest.price0Cumulative) / elapsed;
+        price1TWAP = (newest.price1Cumulative - oldest.price1Cumulative) / elapsed;
+    }
+
+    /// @notice Lookup poolId by token pair for route discovery (P2-2).
+    function getPoolByPair(address token0, address token1) external view returns (bytes32) {
+        return pairToPoolId[getPoolId(token0, token1)];
+    }
+
     // =========================================================================
     // Internal Helpers
     // =========================================================================
 
-    /// @dev Compute swap output using StableSwap or constant-product depending on pool type
+    /// @dev Compute swap output using StableSwap or constant-product depending on pool type.
+    ///      For concentrated liquidity pools, applies virtual reserve adjustment (P2-4).
     function _calculateSwap(
         PoolInfo storage pool,
         uint256 amountIn,
@@ -537,16 +699,44 @@ contract StablecoinPools is
         uint256 amountInAfterFee;
         unchecked { amountInAfterFee = amountIn - fee; }
 
+        uint256 effectiveReserveIn = reserveIn;
+        uint256 effectiveReserveOut = reserveOut;
+
+        // P2-4: Concentrated liquidity virtual reserve adjustment
+        if (pool.concentratedLiquidityMin > 0 && pool.concentratedLiquidityMax > 0) {
+            // Compute current price ratio
+            uint256 currentPrice = (reserveOut * PRECISION) / reserveIn;
+            // Only apply concentration if price is within the liquidity zone
+            if (currentPrice >= pool.concentratedLiquidityMin && currentPrice <= pool.concentratedLiquidityMax) {
+                // Concentrate liquidity by scaling effective reserves
+                uint256 rangeWidth = pool.concentratedLiquidityMax - pool.concentratedLiquidityMin;
+                uint256 fullRange = pool.concentratedLiquidityMax; // Simplified: range relative to max
+                if (rangeWidth > 0 && fullRange > 0) {
+                    // Virtual reserves are amplified within the range
+                    uint256 concentration = (fullRange * PRECISION) / rangeWidth;
+                    effectiveReserveIn = (reserveIn * concentration) / PRECISION;
+                    effectiveReserveOut = (reserveOut * concentration) / PRECISION;
+                }
+            }
+        }
+
         if (pool.isStableToStable) {
-            // StableSwap invariant approximation (simplified, using A=100)
-            amountOut = _stableSwapOutput(amountInAfterFee, reserveIn, reserveOut);
+            // StableSwap invariant approximation using configurable A factor
+            amountOut = _stableSwapOutput(amountInAfterFee, effectiveReserveIn, effectiveReserveOut);
         } else {
             // Constant-product AMM: x * y = k
-            amountOut = (amountInAfterFee * reserveOut) / (reserveIn + amountInAfterFee);
+            amountOut = (amountInAfterFee * effectiveReserveOut) / (effectiveReserveIn + amountInAfterFee);
+        }
+
+        // Scale output back if concentrated liquidity was applied
+        if (effectiveReserveOut != reserveOut && effectiveReserveOut > 0) {
+            amountOut = (amountOut * reserveOut) / effectiveReserveOut;
+        } else {
+            require(effectiveReserveOut > 0, "Zero effective reserve");
         }
     }
 
-    /// @dev Simplified StableSwap output (Newton's method on D invariant with A factor).
+    /// @dev Simplified StableSwap output (Newton's method on D invariant with configurable A factor).
     ///      Callers must ensure x > 0 and y > 0 (enforced by _calculateSwap).
     ///      Reserves are capped at 1e36 to prevent b*b overflow (Solidity 0.8 reverts
     ///      on overflow, but capping gives a meaningful error on very large inputs).
@@ -554,18 +744,19 @@ contract StablecoinPools is
         uint256 dx,
         uint256 x,
         uint256 y
-    ) internal pure returns (uint256 dy) {
+    ) internal view returns (uint256 dy) {
         require(x > 0 && y > 0, "StableSwap: zero reserve");
         // Cap reserves at 1e36 to keep b*b within uint256 bounds
         require(x <= 1e36 && y <= 1e36 && dx <= 1e36, "StableSwap: reserve too large");
 
+        uint256 _aFactor = aFactor;
         // Invariant: A*(x+y) + D = A*D + D^3/(4*x*y)
         // Simplified two-asset approximation used here for gas efficiency
-        uint256 D = x + y + (x * y * 2) / (A_FACTOR * (x + y));
+        uint256 D = x + y + (x * y * 2) / (_aFactor * (x + y));
         uint256 newX = x + dx;
         // Solve for newY using the two-asset stable curve
-        uint256 b = newX + D / A_FACTOR;
-        uint256 c = (D * D * D) / (4 * A_FACTOR * newX);
+        uint256 b = newX + D / _aFactor;
+        uint256 c = (D * D * D) / (4 * _aFactor * newX);
         // newY^2 + b*newY = c  →  newY = (sqrt(b^2 + 4c) - b) / 2
         // b*b is safe because b <= newX + D/A_FACTOR <= 2*1e36 + 1e36 = 3e36 << sqrt(type(uint256).max)
         uint256 disc = b * b + 4 * c;
@@ -586,6 +777,125 @@ contract StablecoinPools is
             z = 1;
         }
     }
+
+    // =========================================================================
+    // Decimal Normalization (P0-1)
+    // =========================================================================
+
+    /// @dev Get decimals for a token. Defaults to 18 if not registered as stablecoin.
+    function _getTokenDecimals(address token) internal view returns (uint8) {
+        StablecoinConfig storage config = _stablecoins[token];
+        if (config.isSupported && config.decimals > 0) {
+            return config.decimals;
+        }
+        return 18; // Default to 18 decimals for ADC and unknown tokens
+    }
+
+    /// @dev Normalize an amount from token-native decimals to 18 decimals.
+    function _normalize(uint256 amount, uint8 tokenDecimals) internal pure returns (uint256) {
+        if (tokenDecimals == 18) return amount;
+        if (tokenDecimals < 18) {
+            return amount * (10 ** (18 - tokenDecimals));
+        }
+        return amount / (10 ** (tokenDecimals - 18));
+    }
+
+    /// @dev Denormalize an amount from 18 decimals back to token-native decimals.
+    function _denormalize(uint256 amount, uint8 tokenDecimals) internal pure returns (uint256) {
+        if (tokenDecimals == 18) return amount;
+        if (tokenDecimals < 18) {
+            return amount / (10 ** (18 - tokenDecimals));
+        }
+        return amount * (10 ** (tokenDecimals - 18));
+    }
+
+    // =========================================================================
+    // TWAP Ring Buffer (P1-1)
+    // =========================================================================
+
+    /// @dev Update TWAP observation for a pool after a swap.
+    function _updateTWAP(bytes32 poolId, PoolInfo storage pool) internal {
+        if (pool.reserve0 == 0 || pool.reserve1 == 0) return;
+
+        uint256 idx = twapIndex[poolId];
+        uint256 count = twapCount[poolId];
+
+        uint256 price0 = (pool.reserve1 * PRECISION) / pool.reserve0;
+        uint256 price1 = (pool.reserve0 * PRECISION) / pool.reserve1;
+
+        uint256 prevCum0;
+        uint256 prevCum1;
+        uint256 prevTimestamp;
+        if (count > 0) {
+            uint256 prevIdx = idx == 0 ? (count >= TWAP_BUFFER_SIZE ? TWAP_BUFFER_SIZE - 1 : count - 1) : idx - 1;
+            TWAPObservation storage prev = twapObservations[poolId][prevIdx];
+            prevCum0 = prev.price0Cumulative;
+            prevCum1 = prev.price1Cumulative;
+            prevTimestamp = prev.timestamp;
+        }
+
+        uint256 elapsed = block.timestamp - prevTimestamp;
+        twapObservations[poolId][idx] = TWAPObservation({
+            timestamp: block.timestamp,
+            price0Cumulative: prevCum0 + price0 * elapsed,
+            price1Cumulative: prevCum1 + price1 * elapsed
+        });
+
+        // Advance ring buffer index
+        twapIndex[poolId] = (idx + 1) % TWAP_BUFFER_SIZE;
+        if (count < TWAP_BUFFER_SIZE) {
+            twapCount[poolId] = count + 1;
+        }
+    }
+
+    // =========================================================================
+    // Oracle Price Validation (P0-4)
+    // =========================================================================
+
+    /// @dev Validate swap price against oracle price for ADC pairs.
+    ///      Reverts if the effective swap rate deviates more than 10% from oracle.
+    function _validateSwapPrice(
+        uint256 amountIn,
+        uint256 amountOut,
+        uint8 decimalsIn,
+        uint8 decimalsOut
+    ) internal view {
+        // Only validate if oracle is configured
+        if (adcPriceFeed == address(0)) return;
+
+        try IAggregatorV3(adcPriceFeed).latestRoundData()
+            returns (uint80, int256 price, uint256, uint256 updatedAt, uint80)
+        {
+            if (price <= 0 || block.timestamp > updatedAt + 1 hours) return; // Skip if oracle is stale
+
+            // Normalize amounts to compare
+            uint256 normalizedIn = _normalize(amountIn, decimalsIn);
+            uint256 normalizedOut = _normalize(amountOut, decimalsOut);
+
+            // Effective swap rate = normalizedOut / normalizedIn
+            uint256 swapRate = (normalizedOut * PRECISION) / normalizedIn;
+            uint256 oracleRate = uint256(price) * PRECISION / 1e8; // Chainlink 8 decimal price
+
+            // Allow 10% deviation
+            uint256 maxRate = (oracleRate * 11000) / BPS;
+            uint256 minRate = (oracleRate * 9000) / BPS;
+
+            require(swapRate >= minRate && swapRate <= maxRate, "Swap price deviates from oracle");
+        } catch {
+            // Oracle call failed – allow swap to proceed
+        }
+    }
+}
+
+/// @dev Minimal Chainlink Aggregator interface for price validation
+interface IAggregatorV3 {
+    function latestRoundData() external view returns (
+        uint80 roundId,
+        int256 answer,
+        uint256 startedAt,
+        uint256 updatedAt,
+        uint80 answeredInRound
+    );
 }
 
 /// @dev Minimal LayerZero endpoint interface
