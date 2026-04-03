@@ -346,18 +346,18 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
         return _getReserveHealth(reserveValue, basePrice);
     }
 
-    function _getBasePriceWithReserve(uint256 reserveValue) internal view returns (uint256) {
+    function _getBasePriceWithReserve(uint256 totalReserveValue) internal view returns (uint256) {
         (, int256 goldPrice,, uint256 updatedAt,) = goldPriceFeed.latestRoundData();
         require(goldPrice > 0, "Invalid gold price");
         require(block.timestamp <= updatedAt + ORACLE_STALENESS_THRESHOLD, "Oracle data stale");
         uint256 goldBase = uint256(goldPrice) * 16;
-        if (reserveValue == 0 || _totalSupply == 0) return goldBase;
-        return (goldBase * reserveValue * 10**2 * PRECISION) / (_totalSupply * PRECISION);
+        if (totalReserveValue == 0 || _totalSupply == 0) return goldBase;
+        return (goldBase * totalReserveValue * 10**2 * PRECISION) / (_totalSupply * PRECISION);
     }
 
-    function _getReserveHealth(uint256 reserveValue, uint256 basePrice) internal view returns (uint256) {
+    function _getReserveHealth(uint256 totalReserveValue, uint256 basePrice) internal view returns (uint256) {
         uint256 supplyValue = (_totalSupply * basePrice) / PRECISION / 10**2;
-        return supplyValue > 0 ? (reserveValue * PRECISION / supplyValue) : PRECISION;
+        return supplyValue > 0 ? (totalReserveValue * PRECISION / supplyValue) : PRECISION;
     }
 
     function _mintADC(address to, uint256 value) internal {
