@@ -187,9 +187,10 @@ contract CBDCBridge is
         uint256 amount
     ) external override nonReentrant whenNotPaused {
         CBDCConfig storage cfg = _cbdcConfigs[token];
+        CentralBankPolicy storage policy = _policies[token];
         require(cfg.active, "CBDC not registered");
         require(msg.sender == cfg.mintAuthority, "Not mint authority");
-        require(_policies[token].transfersEnabled, "Transfers disabled by policy");
+        require(policy.transfersEnabled, "Transfers disabled by policy");
         require(amount >= cfg.minTxAmount, "Below min tx amount");
         require(cfg.maxTxAmount == 0 || amount <= cfg.maxTxAmount, "Exceeds max tx amount");
         require(recipient != address(0), "Zero recipient");
@@ -216,9 +217,10 @@ contract CBDCBridge is
         uint256 amount
     ) external override nonReentrant whenNotPaused {
         CBDCConfig storage cfg = _cbdcConfigs[token];
+        CentralBankPolicy storage policy = _policies[token];
         require(cfg.active, "CBDC not registered");
         require(msg.sender == cfg.burnAuthority, "Not burn authority");
-        require(_policies[token].transfersEnabled, "Transfers disabled by policy");
+        require(policy.transfersEnabled, "Transfers disabled by policy");
         require(amount >= cfg.minTxAmount, "Below min tx amount");
         require(cfg.maxTxAmount == 0 || amount <= cfg.maxTxAmount, "Exceeds max tx amount");
 
@@ -240,8 +242,9 @@ contract CBDCBridge is
         whenNotPaused
     {
         CBDCConfig storage cfg = _cbdcConfigs[token];
+        CentralBankPolicy storage policy = _policies[token];
         require(cfg.active, "CBDC not registered");
-        require(_policies[token].liquidityEnabled, "Liquidity disabled by policy");
+        require(policy.liquidityEnabled, "Liquidity disabled by policy");
         require(amount > 0, "Zero amount");
 
         IERC20Upgradeable(token).safeTransferFrom(msg.sender, address(this), amount);
