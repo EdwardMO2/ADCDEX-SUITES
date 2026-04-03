@@ -2,6 +2,7 @@
 pragma solidity ^0.8.23;
 
 import "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/token/ERC20/utils/SafeERC20Upgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
@@ -9,6 +10,8 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "../ADCGovernor.sol";
 
 contract ADCDEX is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeable, UUPSUpgradeable {
+    using SafeERC20Upgradeable for IERC20Upgradeable;
+
     ADCGovernor public governor;
     bool public paused;
 
@@ -46,6 +49,8 @@ contract ADCDEX is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeable
 
     mapping(uint256 => RebalanceProposal) public proposals;
     uint256 public proposalCount;
+    /// @dev Prevents double voting: proposalId → voter → already voted
+    mapping(uint256 => mapping(address => bool)) public hasVoted;
 
     event LiquidityAdded(address indexed pair, address indexed provider, uint256 amount0, uint256 amount1, uint256 lpTokens);
     event LiquidityRemoved(address indexed pair, address indexed provider, uint256 amount0, uint256 amount1, uint256 lpTokens);
@@ -117,8 +122,8 @@ contract ADCDEX is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeable
         require(address(config.token0) != address(0), "Pool does not exist");
         require(amount0 > 0 && amount1 > 0, "Zero amounts");
 
-        config.token0.transferFrom(msg.sender, address(this), amount0);
-        config.token1.transferFrom(msg.sender, address(this), amount1);
+        config.token0.safeTransferFrom(msg.sender, address(this), amount0);
+        config.token1.safeTransferFrom(msg.sender, address(this), amount1);
 
         if (state.totalLPTokens == 0) {
             lpTokensMinted = sqrt(amount0 * amount1);
@@ -149,8 +154,8 @@ contract ADCDEX is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeable
         state.reserve1 -= amount1;
 
         PoolConfig memory config = poolConfigs[pair];
-        config.token0.transfer(msg.sender, amount0);
-        config.token1.transfer(msg.sender, amount1);
+        config.token0.safeTransfer(msg.sender, amount0);
+        config.token1.safeTransfer(msg.sender, amount1);
 
         emit LiquidityRemoved(pair, msg.sender, amount0, amount1, lpTokens);
     }
@@ -167,7 +172,7 @@ contract ADCDEX is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeable
             ? (config.token0, config.token1, state.reserve0, state.reserve1)
             : (config.token1, config.token0, state.reserve1, state.reserve0);
 
-        input.transferFrom(msg.sender, address(this), inputAmount);
+        input.safeTransferFrom(msg.sender, address(this), inputAmount);
 
         if (config.isStable) {
             outputAmount = getStableSwapAmount(inputAmount, reserveIn, reserveOut, config.feeBps);
@@ -178,8 +183,7 @@ contract ADCDEX is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeable
 
         require(outputAmount >= minOutputAmount, "Slippage too high");
 
-        output.transfer(msg.sender, outputAmount);
-
+        // Update reserves BEFORE transfer (Checks-Effects-Interactions)
         if (isToken0) {
             state.reserve0 += inputAmount;
             state.reserve1 -= outputAmount;
@@ -188,12 +192,26 @@ contract ADCDEX is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeable
             state.reserve0 -= outputAmount;
         }
 
+        output.safeTransfer(msg.sender, outputAmount);
+
         emit Swapped(pair, msg.sender, inputToken, inputAmount, outputAmount);
     }
 
     function proposeRebalance(address pair, uint256 targetReserve0, uint256 targetReserve1) external whenNotPaused {
         require(targetReserve0 > 0 && targetReserve1 > 0, "Invalid targets");
-        require(veADC(governor.veADCToken()).balanceOf(msg.sender) >= minProposalThreshold, "Insufficient veADC");
+        // Use actual voting power instead of NFT balance for proposal threshold
+        veADC veToken = veADC(governor.veADCToken());
+        uint256 veBalance = veToken.balanceOf(msg.sender);
+        require(veBalance > 0, "No veADC tokens");
+        // Cap iteration to prevent gas limit issues
+        uint256 maxTokens = veBalance > 50 ? 50 : veBalance;
+        uint256 totalPower = 0;
+        for (uint256 i = 0; i < maxTokens; ) {
+            uint256 tokenId = veToken.tokenOfOwnerByIndex(msg.sender, i);
+            totalPower += veToken.getVotingPower(tokenId);
+            unchecked { ++i; }
+        }
+        require(totalPower >= minProposalThreshold, "Insufficient veADC voting power");
         require(proposals[proposalCount].deadline < block.timestamp, "Active proposal exists");
 
         proposals[proposalCount] = RebalanceProposal({
@@ -211,9 +229,34 @@ contract ADCDEX is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeable
     }
 
     function vote(uint256 proposalId, bool support) external whenNotPaused {
-        uint256 weight = veADC(governor.veADCToken()).balanceOf(msg.sender);
-        require(weight > 0, "No voting power");
+        // P0-5: Weight voting by LP position exposure, not just veADC NFT count.
+        //       Use veADC voting power (time-weighted) for governance weight.
+        veADC veToken = veADC(governor.veADCToken());
+        uint256 veBalance = veToken.balanceOf(msg.sender);
+        require(veBalance > 0, "No voting power");
         require(block.timestamp < proposals[proposalId].deadline, "Voting closed");
+        require(!hasVoted[proposalId][msg.sender], "Already voted");
+
+        // Calculate actual voting power from all veADC positions (capped for gas safety)
+        uint256 weight = 0;
+        uint256 maxTokens = veBalance > 50 ? 50 : veBalance;
+        for (uint256 i = 0; i < maxTokens; ) {
+            uint256 tokenId = veToken.tokenOfOwnerByIndex(msg.sender, i);
+            weight += veToken.getVotingPower(tokenId);
+            unchecked { ++i; }
+        }
+        require(weight > 0, "No active voting power");
+
+        // Weight by LP position exposure in the proposed pool
+        PoolState storage state = poolStates[proposals[proposalId].pair];
+        uint256 lpBalance = state.lpBalances[msg.sender];
+        if (lpBalance > 0 && state.totalLPTokens > 0) {
+            // Boost voting power proportional to LP exposure (up to 2x)
+            uint256 lpShare = (lpBalance * 1e18) / state.totalLPTokens;
+            weight = weight + (weight * lpShare) / 1e18;
+        }
+
+        hasVoted[proposalId][msg.sender] = true;
 
         if (support) {
             proposals[proposalId].votesFor += weight;

@@ -2,15 +2,19 @@
 pragma solidity ^0.8.23;
 
 import "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/token/ERC20/utils/SafeERC20Upgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/token/ERC721/extensions/ERC721EnumerableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 
 contract veADC is Initializable, ERC721EnumerableUpgradeable, UUPSUpgradeable, OwnableUpgradeable {
+    using SafeERC20Upgradeable for IERC20Upgradeable;
+
     IERC20Upgradeable public adcToken;
     uint256 public tokenIdCounter;
     uint256 public constant MAX_LOCK_DURATION = 365 days;
+    uint256 public constant MIN_LOCK_AMOUNT = 100e18;
 
     struct LockInfo {
         uint256 amount;
@@ -19,10 +23,24 @@ contract veADC is Initializable, ERC721EnumerableUpgradeable, UUPSUpgradeable, O
 
     mapping(uint256 => LockInfo) public locks;
 
+    /// @dev Cached total voting power, updated on lock/unlock operations.
+    uint256 private _cachedTotalVotingPower;
+    /// @dev Sum of (amount * unlockTime / MAX_LOCK_DURATION) for all active locks.
+    ///      Used together with a time-weighted approach: totalVotingPower at time T
+    ///      = _weightedSum - (_totalLockedAmount * T) / MAX_LOCK_DURATION
+    uint256 private _weightedSum;
+    /// @dev Total amount locked across all active veADC positions.
+    uint256 private _totalLockedAmount;
+    /// @dev Timestamp of the last checkpoint update.
+    uint256 private _lastCheckpointTime;
+
     event Locked(address indexed user, uint256 indexed tokenId, uint256 amount, uint256 unlockTime);
     event Unlocked(address indexed user, uint256 indexed tokenId, uint256 amount);
+    event EmergencyUnlocked(address indexed user, uint256 indexed tokenId, uint256 amount);
 
     function initialize(address _adcToken, address _owner) public initializer {
+        require(_adcToken != address(0), "Invalid token address");
+        require(_owner != address(0), "Invalid owner address");
         __ERC721_init("Vote Escrowed ADC", "veADC");
         __Ownable_init(_owner);
         __UUPSUpgradeable_init();
@@ -33,16 +51,21 @@ contract veADC is Initializable, ERC721EnumerableUpgradeable, UUPSUpgradeable, O
     function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
 
     function lock(uint256 amount, uint256 duration) external returns (uint256 tokenId) {
-        require(amount > 0, "Invalid amount");
+        require(amount >= MIN_LOCK_AMOUNT, "Below minimum lock amount");
         require(duration > 0 && duration <= MAX_LOCK_DURATION, "Invalid lock duration");
 
         tokenId = ++tokenIdCounter;
         uint256 unlockTime = block.timestamp + duration;
 
-        adcToken.transferFrom(msg.sender, address(this), amount);
+        adcToken.safeTransferFrom(msg.sender, address(this), amount);
 
         locks[tokenId] = LockInfo(amount, unlockTime);
         _mint(msg.sender, tokenId);
+
+        // Update cached voting power checkpoint
+        _weightedSum += (amount * unlockTime) / MAX_LOCK_DURATION;
+        _totalLockedAmount += amount;
+        _lastCheckpointTime = block.timestamp;
 
         emit Locked(msg.sender, tokenId, amount, unlockTime);
     }
@@ -52,26 +75,62 @@ contract veADC is Initializable, ERC721EnumerableUpgradeable, UUPSUpgradeable, O
         LockInfo memory lockInfo = locks[tokenId];
         require(block.timestamp >= lockInfo.unlockTime, "Lock period not over");
 
+        // Update checkpoint before removing the lock
+        _weightedSum -= (lockInfo.amount * lockInfo.unlockTime) / MAX_LOCK_DURATION;
+        _totalLockedAmount -= lockInfo.amount;
+        _lastCheckpointTime = block.timestamp;
+
         delete locks[tokenId];
         _burn(tokenId);
 
-        adcToken.transfer(msg.sender, lockInfo.amount);
+        adcToken.safeTransfer(msg.sender, lockInfo.amount);
 
         emit Unlocked(msg.sender, tokenId, lockInfo.amount);
+    }
+
+    /// @notice Emergency unlock by owner — allows admin to release stuck funds
+    ///         in extraordinary circumstances (e.g. migration, critical bug).
+    function emergencyUnlock(uint256 tokenId) external onlyOwner {
+        address tokenOwner = ownerOf(tokenId);
+        LockInfo memory lockInfo = locks[tokenId];
+        require(lockInfo.amount > 0, "No lock exists");
+
+        // Update checkpoint
+        _weightedSum -= (lockInfo.amount * lockInfo.unlockTime) / MAX_LOCK_DURATION;
+        _totalLockedAmount -= lockInfo.amount;
+        _lastCheckpointTime = block.timestamp;
+
+        delete locks[tokenId];
+        _burn(tokenId);
+
+        adcToken.safeTransfer(tokenOwner, lockInfo.amount);
+
+        emit EmergencyUnlocked(tokenOwner, tokenId, lockInfo.amount);
     }
 
     function getVotingPower(uint256 tokenId) public view returns (uint256) {
         LockInfo memory lockInfo = locks[tokenId];
         if (block.timestamp >= lockInfo.unlockTime) return 0;
 
-        uint256 remaining = lockInfo.unlockTime - block.timestamp;
+        uint256 remaining;
+        unchecked { remaining = lockInfo.unlockTime - block.timestamp; }
         return (lockInfo.amount * remaining) / MAX_LOCK_DURATION;
     }
 
-    function totalVotingPower() external view returns (uint256 power) {
-        uint256 supply = totalSupply();
-        for (uint256 i = 0; i < supply; i++) {
-            power += getVotingPower(tokenByIndex(i));
-        }
+    /// @notice Returns the total voting power across all active locks.
+    ///         Uses checkpoint-based O(1) calculation instead of iterating all tokens.
+    function totalVotingPower() external view returns (uint256) {
+        if (_totalLockedAmount == 0) return 0;
+        // votingPower(i) = amount_i * (unlockTime_i - now) / MAX_LOCK_DURATION
+        // sum = sum(amount_i * unlockTime_i / MAX_LOCK_DURATION) - now * sum(amount_i) / MAX_LOCK_DURATION
+        // sum = _weightedSum - block.timestamp * _totalLockedAmount / MAX_LOCK_DURATION
+        uint256 timeComponent = (block.timestamp * _totalLockedAmount) / MAX_LOCK_DURATION;
+        if (_weightedSum <= timeComponent) return 0;
+        unchecked { return _weightedSum - timeComponent; }
+    }
+
+    /// @notice Returns the total amount of ADC locked in veADC positions.
+    function totalLocked() external view returns (uint256) {
+        return _totalLockedAmount;
     }
 }

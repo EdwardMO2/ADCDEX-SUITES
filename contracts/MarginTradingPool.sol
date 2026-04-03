@@ -8,6 +8,7 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
 
 /// @title MarginTradingPool
 /// @notice Overcollateralised lending pool.  Users deposit collateral, borrow up to
@@ -35,6 +36,8 @@ contract MarginTradingPool is
     uint256 public constant BPS                    = 10_000;
     /// @dev ~3 % APY – 0.000001 per second.
     uint256 public constant INTEREST_RATE_PER_SECOND = 1e12;  // 1e12 / 1e18 = 0.000001
+    /// @dev Maximum allowed staleness for Chainlink price data.
+    uint256 public constant ORACLE_STALENESS_THRESHOLD = 1 hours;
 
     // =========================================================================
     // Structs
@@ -53,10 +56,14 @@ contract MarginTradingPool is
 
     /// @notice Per-user margin accounts.
     mapping(address => UserMarginAccount) public accounts;
-    /// @notice Token deposited as collateral (e.g. USDC).
+    /// @notice Token deposited as collateral (e.g. a supported stablecoin).
     address public collateralToken;
-    /// @notice Token that users borrow (e.g. USDC or a synthetic).
+    /// @notice Token that users borrow (e.g. a stablecoin or a synthetic).
     address public borrowToken;
+    /// @notice Chainlink price feed for the collateral token (USD-denominated).
+    address public collateralPriceFeed;
+    /// @notice Chainlink price feed for the borrow token (USD-denominated).
+    address public borrowPriceFeed;
 
     // =========================================================================
     // Events
@@ -109,6 +116,14 @@ contract MarginTradingPool is
     // Collateral Management
     // =========================================================================
 
+    /// @notice Set Chainlink price feeds for collateral and borrow tokens.
+    /// @param _collateralFeed Chainlink AggregatorV3Interface for collateral token.
+    /// @param _borrowFeed     Chainlink AggregatorV3Interface for borrow token.
+    function setPriceFeeds(address _collateralFeed, address _borrowFeed) external onlyOwner {
+        collateralPriceFeed = _collateralFeed;
+        borrowPriceFeed = _borrowFeed;
+    }
+
     /// @notice Deposit collateral into your margin account.
     /// @param amount Amount of collateralToken to deposit.
     function depositCollateral(uint256 amount) external nonReentrant {
@@ -136,15 +151,18 @@ contract MarginTradingPool is
         UserMarginAccount storage acct = accounts[msg.sender];
         require(acct.collateral >= amount, "MTP: insufficient collateral");
 
-        acct.collateral -= amount;
+        unchecked { acct.collateral -= amount; }
 
         // Ensure account remains healthy after withdrawal
         if (acct.borrowed > 0) {
             uint256 hf = _computeHealthFactor(acct.collateral, acct.borrowed);
             require(hf >= BPS, "MTP: health factor too low");
+            // Store computed value directly to avoid redundant _updateHealthFactor() call
+            acct.healthFactor = hf;
+        } else {
+            acct.healthFactor = type(uint256).max;
         }
 
-        _updateHealthFactor(msg.sender);
         IERC20Upgradeable(collateralToken).safeTransfer(msg.sender, amount);
         emit CollateralWithdrawn(msg.sender, amount);
     }
@@ -187,7 +205,7 @@ contract MarginTradingPool is
         require(acct.borrowed > 0, "MTP: no debt");
 
         uint256 repayAmount = amount > acct.borrowed ? acct.borrowed : amount;
-        acct.borrowed -= repayAmount;
+        unchecked { acct.borrowed -= repayAmount; }
 
         _updateHealthFactor(msg.sender);
         IERC20Upgradeable(borrowToken).safeTransferFrom(msg.sender, address(this), repayAmount);
@@ -268,17 +286,46 @@ contract MarginTradingPool is
         if (elapsed == 0) return;
 
         uint256 interest = (acct.borrowed * INTEREST_RATE_PER_SECOND * elapsed) / PRECISION;
-        acct.borrowed         += interest;
+        unchecked { acct.borrowed += interest; }
         acct.lastInterestTime  = block.timestamp;
     }
 
-    /// @dev Compute health factor = (collateral * BPS) / (borrowed * LIQUIDATION_RATIO / BPS).
-    ///      Simplifies to: (collateral * BPS * BPS) / (borrowed * LIQUIDATION_RATIO).
+    /// @dev Fetch a Chainlink price. Returns the price scaled to 18 decimals, or 0 if unavailable.
+    function _getChainlinkPrice(address feed) internal view returns (uint256) {
+        if (feed == address(0)) return 0;
+
+        try AggregatorV3Interface(feed).latestRoundData()
+            returns (uint80 roundId, int256 answer, uint256, uint256 updatedAt, uint80 answeredInRound)
+        {
+            if (answer <= 0) return 0;
+            if (block.timestamp > updatedAt + ORACLE_STALENESS_THRESHOLD) return 0;
+            if (answeredInRound < roundId) return 0;
+
+            uint8 feedDecimals = AggregatorV3Interface(feed).decimals();
+            return uint256(answer) * (PRECISION / (10 ** feedDecimals));
+        } catch {
+            return 0;
+        }
+    }
+
+    /// @dev Compute health factor using oracle prices when available.
+    ///      health = (collateral * collateralPrice * BPS * BPS) / (borrowed * borrowPrice * LIQUIDATION_RATIO).
+    ///      Falls back to 1:1 pricing if no oracle feeds are configured.
     function _computeHealthFactor(
         uint256 collateral,
         uint256 borrowed
-    ) internal pure returns (uint256) {
+    ) internal view returns (uint256) {
         if (borrowed == 0) return type(uint256).max;
+
+        uint256 collateralPrice = _getChainlinkPrice(collateralPriceFeed);
+        uint256 borrowPrice = _getChainlinkPrice(borrowPriceFeed);
+
+        if (collateralPrice > 0 && borrowPrice > 0) {
+            // Oracle-based: (collateral * collateralPrice * BPS * BPS) / (borrowed * borrowPrice * LIQUIDATION_RATIO)
+            return (collateral * collateralPrice * BPS * BPS) / (borrowed * borrowPrice * LIQUIDATION_RATIO);
+        }
+
+        // Fallback: 1:1 pricing
         return (collateral * BPS * BPS) / (borrowed * LIQUIDATION_RATIO);
     }
 

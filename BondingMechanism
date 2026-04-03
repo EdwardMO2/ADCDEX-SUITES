@@ -2,11 +2,14 @@
 pragma solidity ^0.8.23;
 
 import "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/token/ERC20/utils/SafeERC20Upgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 
 contract BondingMechanism is Initializable, UUPSUpgradeable, OwnableUpgradeable {
+    using SafeERC20Upgradeable for IERC20Upgradeable;
+
     IERC20Upgradeable public adcToken;
     address public treasury;
 
@@ -39,7 +42,7 @@ contract BondingMechanism is Initializable, UUPSUpgradeable, OwnableUpgradeable 
     function bondAsset(address token, uint256 amount) external {
         require(amount > 0, "Invalid amount");
 
-        IERC20Upgradeable(token).transferFrom(msg.sender, treasury, amount);
+        IERC20Upgradeable(token).safeTransferFrom(msg.sender, treasury, amount);
 
         uint256 adcOut = getDiscountedADC(amount, token);
 
@@ -62,7 +65,7 @@ contract BondingMechanism is Initializable, UUPSUpgradeable, OwnableUpgradeable 
         uint256 claimable = bond.amountADC - bond.claimed;
         bond.claimed = bond.amountADC;
 
-        adcToken.transfer(msg.sender, claimable);
+        adcToken.safeTransfer(msg.sender, claimable);
 
         emit BondClaimed(msg.sender, bondId, claimable);
     }

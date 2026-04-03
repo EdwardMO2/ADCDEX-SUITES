@@ -5,11 +5,13 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "./SwapRouter.sol";
+import "./Interfaces/ISwapPool.sol";
 
 /// @title RouterQuote
 /// @notice Off-chain-friendly quote engine.  Returns estimated output, price impact,
 ///         and total fees for SwapRouter Route and SplitRoute definitions without
-///         executing any token transfers.
+///         executing any token transfers.  Queries real pool contracts for accurate
+///         fee and output estimates.
 /// @dev    UUPSUpgradeable – upgrade through governance.
 contract RouterQuote is
     Initializable,
@@ -20,7 +22,7 @@ contract RouterQuote is
     // State
     // =========================================================================
 
-    /// @notice Address of the SwapRouter whose fee logic this contract mirrors.
+    /// @notice Address of the SwapRouter whose pool registry this contract reads.
     address public swapRouter;
 
     uint256 public constant BPS = 10_000;
@@ -63,10 +65,11 @@ contract RouterQuote is
     // Quote Functions
     // =========================================================================
 
-    /// @notice Estimate the output for a single-path route.
+    /// @notice Estimate the output for a single-path route by querying real pool
+    ///         contracts registered in the SwapRouter.
     /// @param route          The route to quote.
     /// @return estimatedOut  Estimated output after all hop fees.
-    /// @return priceImpactBps Price impact expressed in BPS (simplified: total fees as proxy).
+    /// @return priceImpactBps Cumulative price impact in BPS across all hops.
     /// @return totalFees     Cumulative fee deducted across all hops.
     function quoteSwapRoute(SwapRouter.Route calldata route)
         external
@@ -78,23 +81,30 @@ contract RouterQuote is
     {
         uint256 hops = route.path.length;
         require(hops >= 2, "RouterQuote: path too short");
-        require(route.fees.length == hops - 1, "RouterQuote: fees length mismatch");
+        require(route.poolIds.length == hops - 1, "RouterQuote: poolIds length mismatch");
         require(route.amountIn > 0, "RouterQuote: zero amountIn");
 
         // Validate all token addresses in path are non-zero
-        for (uint256 i = 0; i < hops; i++) {
+        for (uint256 i = 0; i < hops; ) {
             require(route.path[i] != address(0), "RouterQuote: zero token address in path");
+            unchecked { ++i; }
         }
 
         estimatedOut = route.amountIn;
-        for (uint256 i = 0; i < hops - 1; i++) {
-            require(route.fees[i] <= BPS, "RouterQuote: fee exceeds 100%");
-            uint256 fee  = (estimatedOut * route.fees[i]) / BPS;
-            totalFees   += fee;
-            estimatedOut = estimatedOut - fee;
-        }
+        uint256 hopCount = hops - 1;
+        for (uint256 i = 0; i < hopCount; ) {
+            address poolAddr = SwapRouter(swapRouter).pools(route.poolIds[i]);
+            require(poolAddr != address(0), "RouterQuote: pool not registered");
 
-        priceImpactBps = (totalFees * BPS) / route.amountIn;
+            (uint256 hopOut, uint256 hopFee, uint256 hopImpact) =
+                ISwapPool(poolAddr).getSwapQuote(route.poolIds[i], route.path[i], estimatedOut);
+
+            totalFees      += hopFee;
+            priceImpactBps += hopImpact;
+            estimatedOut    = hopOut;
+
+            unchecked { ++i; }
+        }
 
         emit QuoteGenerated(msg.sender, estimatedOut, priceImpactBps, totalFees);
     }
@@ -111,25 +121,32 @@ contract RouterQuote is
         require(numRoutes == splitRoute.weights.length, "RouterQuote: weights mismatch");
 
         uint256 totalWeight;
-        for (uint256 i = 0; i < numRoutes; i++) {
+        for (uint256 i = 0; i < numRoutes; ) {
             totalWeight += splitRoute.weights[i];
+            unchecked { ++i; }
         }
         require(totalWeight == BPS, "RouterQuote: weights must sum to BPS");
 
         uint256 totalIn = splitRoute.routes[0].amountIn;
 
-        for (uint256 i = 0; i < numRoutes; i++) {
-            SwapRouter.Route memory r = splitRoute.routes[i];
+        for (uint256 i = 0; i < numRoutes; ) {
+            SwapRouter.Route calldata r = splitRoute.routes[i];
             uint256 splitAmt = (totalIn * splitRoute.weights[i]) / BPS;
 
             uint256 hopOut = splitAmt;
             uint256 hops   = r.path.length;
-            for (uint256 j = 0; j < hops - 1; j++) {
-                require(r.fees[j] <= BPS, "RouterQuote: fee exceeds 100%");
-                uint256 fee = (hopOut * r.fees[j]) / BPS;
-                hopOut      = hopOut - fee;
+            for (uint256 j = 0; j < hops - 1; ) {
+                address poolAddr = SwapRouter(swapRouter).pools(r.poolIds[j]);
+                require(poolAddr != address(0), "RouterQuote: pool not registered");
+
+                (uint256 out,,) =
+                    ISwapPool(poolAddr).getSwapQuote(r.poolIds[j], r.path[j], hopOut);
+                hopOut = out;
+
+                unchecked { ++j; }
             }
             estimatedOut += hopOut;
+            unchecked { ++i; }
         }
 
         emit QuoteGenerated(msg.sender, estimatedOut, 0, 0);

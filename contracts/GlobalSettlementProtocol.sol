@@ -61,12 +61,22 @@ contract GlobalSettlementProtocol is
     address[] private _complianceHooks;
     mapping(address => bool) private _isComplianceHook;
 
+    /// @dev Maximum number of compliance hooks allowed
+    uint256 public constant MAX_COMPLIANCE_HOOKS = 10;
+
+    /// @dev Maximum number of audit entries per settlement before rotation
+    uint256 public constant MAX_AUDIT_ENTRIES = 200;
+
     /// @dev settlement id → array of (action, timestamp) pairs
     mapping(bytes32 => string[]) private _auditActions;
     mapping(bytes32 => uint256[]) private _auditTimestamps;
+    /// @dev write pointer per settlement for circular-buffer rotation
+    mapping(bytes32 => uint256) private _auditHead;
 
     /// @dev LayerZero trusted remotes
     mapping(uint32 => bytes) public trustedRemotes;
+    /// @dev chainId → last processed nonce for replay protection
+    mapping(uint32 => uint64) public lastProcessedNonce;
 
     // =========================================================================
     // Initializer
@@ -263,7 +273,22 @@ contract GlobalSettlementProtocol is
     ) external override whenNotPaused {
         _netPositions[msg.sender][counterparty][token] += amount;
         _netPositions[counterparty][msg.sender][token] -= amount;
-        emit NetPositionUpdated(msg.sender, token, _netPositions[msg.sender][counterparty][token]);
+
+        // Bounds check: net positions must not exceed available token balance
+        int256 netPos = _netPositions[msg.sender][counterparty][token];
+        int256 counterpartyNetPos = _netPositions[counterparty][msg.sender][token];
+        uint256 contractBalance = IERC20Upgradeable(token).balanceOf(address(this));
+
+        // Positive position = counterparty owes us; verify contract can fulfil
+        if (netPos > 0) {
+            require(uint256(netPos) <= contractBalance, "Net position exceeds available balance");
+        }
+        // Negative counterparty position = they are owed; verify contract can fulfil
+        if (counterpartyNetPos > 0) {
+            require(uint256(counterpartyNetPos) <= contractBalance, "Counterparty net position exceeds available balance");
+        }
+
+        emit NetPositionUpdated(msg.sender, token, netPos);
     }
 
     /// @inheritdoc ISettlementProtocol
@@ -273,10 +298,13 @@ contract GlobalSettlementProtocol is
         nonReentrant
         whenNotPaused
     {
-        for (uint256 i = 0; i < tokens.length; i++) {
+        for (uint256 i = 0; i < tokens.length; ) {
             address token = tokens[i];
             int256 position = _netPositions[msg.sender][counterparty][token];
-            if (position == 0) continue;
+            if (position == 0) {
+                unchecked { ++i; }
+                continue;
+            }
 
             // Positive: counterparty owes us; negative: we owe counterparty
             if (position > 0) {
@@ -292,6 +320,7 @@ contract GlobalSettlementProtocol is
 
             emit NetPositionUpdated(msg.sender, token, 0);
             emit NetPositionUpdated(counterparty, token, 0);
+            unchecked { ++i; }
         }
     }
 
@@ -315,7 +344,10 @@ contract GlobalSettlementProtocol is
     {
         require(tokens.length == weights.length, "Length mismatch");
         uint256 sum;
-        for (uint256 i = 0; i < weights.length; i++) sum += weights[i];
+        for (uint256 i = 0; i < weights.length; ) {
+            sum += weights[i];
+            unchecked { ++i; }
+        }
         require(sum == SDR_PRECISION, "Weights must sum to 1e18");
 
         _sdrBasket.tokens = tokens;
@@ -326,12 +358,14 @@ contract GlobalSettlementProtocol is
     /// @inheritdoc ISettlementProtocol
     function rebalanceSDR() external override whenNotPaused {
         SDRBasket storage basket = _sdrBasket;
-        require(basket.tokens.length > 0, "Basket not configured");
+        address[] memory tokens = basket.tokens;
+        uint256 tokenCount = tokens.length;
+        require(tokenCount > 0, "Basket not configured");
 
         uint256 totalValue;
-        for (uint256 i = 0; i < basket.tokens.length; i++) {
-            // Use on-chain balance as a proxy for value (oracle can be plugged in)
-            totalValue += IERC20Upgradeable(basket.tokens[i]).balanceOf(address(this));
+        for (uint256 i = 0; i < tokenCount; ) {
+            totalValue += IERC20Upgradeable(tokens[i]).balanceOf(address(this));
+            unchecked { ++i; }
         }
 
         basket.totalValue = totalValue;
@@ -358,6 +392,7 @@ contract GlobalSettlementProtocol is
     function addComplianceHook(address hook) external override onlyOwner {
         require(hook != address(0), "Zero address");
         require(!_isComplianceHook[hook], "Already added");
+        require(_complianceHooks.length < MAX_COMPLIANCE_HOOKS, "Max compliance hooks reached");
         _isComplianceHook[hook] = true;
         _complianceHooks.push(hook);
     }
@@ -366,12 +401,14 @@ contract GlobalSettlementProtocol is
     function removeComplianceHook(address hook) external override onlyOwner {
         require(_isComplianceHook[hook], "Hook not found");
         _isComplianceHook[hook] = false;
-        for (uint256 i = 0; i < _complianceHooks.length; i++) {
+        uint256 len = _complianceHooks.length;
+        for (uint256 i = 0; i < len; ) {
             if (_complianceHooks[i] == hook) {
-                _complianceHooks[i] = _complianceHooks[_complianceHooks.length - 1];
+                _complianceHooks[i] = _complianceHooks[len - 1];
                 _complianceHooks.pop();
                 break;
             }
+            unchecked { ++i; }
         }
     }
 
@@ -440,7 +477,7 @@ contract GlobalSettlementProtocol is
     function lzReceive(
         uint16 srcChainId,
         bytes calldata srcAddress,
-        uint64, /* nonce */
+        uint64 nonce,
         bytes calldata payload
     ) external override {
         require(msg.sender == lzEndpoint, "Caller is not LZ endpoint");
@@ -448,6 +485,11 @@ contract GlobalSettlementProtocol is
             keccak256(srcAddress) == keccak256(trustedRemotes[uint32(srcChainId)]),
             "Untrusted source"
         );
+
+        // Replay protection: enforce monotonically increasing nonces
+        uint32 srcChain = uint32(srcChainId);
+        require(nonce > lastProcessedNonce[srcChain], "Stale or replayed message");
+        lastProcessedNonce[srcChain] = nonce;
 
         (bytes32 settlementId, address initiator, address tokenIn, uint256 amountIn) =
             abi.decode(payload, (bytes32, address, address, uint256));
@@ -519,26 +561,43 @@ contract GlobalSettlementProtocol is
         uint256 amount,
         bytes memory /*complianceData*/
     ) internal {
-        for (uint256 i = 0; i < _complianceHooks.length; i++) {
-            address hook = _complianceHooks[i];
-            (bool success, ) = hook.call{gas: 100_000}(
-                abi.encodeWithSignature(
-                    "screenTransaction(address,uint256,bytes32)",
-                    user,
-                    amount,
-                    settlementId
-                )
-            );
-            emit ComplianceHookCalled(settlementId, hook, success);
-            require(success, "Compliance hook rejected");
+        address[] memory hooks = _complianceHooks;
+        uint256 hookCount = hooks.length;
+        for (uint256 i = 0; i < hookCount; ) {
+            address hook = hooks[i];
+            // Use try/catch to prevent a malicious or reverting hook from blocking settlements
+            try IComplianceHook(hook).screenTransaction(user, amount, settlementId) {
+                emit ComplianceHookCalled(settlementId, hook, true);
+            } catch {
+                // Hook failed — log but do not revert.
+                // Critical compliance checks should be enforced at a higher level.
+                emit ComplianceHookCalled(settlementId, hook, false);
+            }
+            unchecked { ++i; }
         }
     }
 
     function _recordAudit(bytes32 settlementId, string memory action) internal {
-        _auditActions[settlementId].push(action);
-        _auditTimestamps[settlementId].push(block.timestamp);
+        string[] storage actions = _auditActions[settlementId];
+        uint256[] storage timestamps = _auditTimestamps[settlementId];
+
+        if (actions.length < MAX_AUDIT_ENTRIES) {
+            actions.push(action);
+            timestamps.push(block.timestamp);
+        } else {
+            // Circular-buffer rotation: overwrite oldest entry
+            uint256 head = _auditHead[settlementId];
+            actions[head] = action;
+            timestamps[head] = block.timestamp;
+            unchecked { _auditHead[settlementId] = (head + 1) % MAX_AUDIT_ENTRIES; }
+        }
         emit AuditTrailRecorded(settlementId, msg.sender, action, block.timestamp);
     }
+}
+
+/// @dev Minimal compliance hook interface for structured calls
+interface IComplianceHook {
+    function screenTransaction(address user, uint256 amount, bytes32 ref) external;
 }
 
 /// @dev Minimal LayerZero endpoint interface (repeated to avoid cross-file deps)

@@ -2,12 +2,15 @@
 pragma solidity ^0.8.23;
 
 import "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/token/ERC20/utils/SafeERC20Upgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 
 contract VaultWrapper is Initializable, UUPSUpgradeable, OwnableUpgradeable, ReentrancyGuardUpgradeable {
+    using SafeERC20Upgradeable for IERC20Upgradeable;
+
     IERC20Upgradeable public lpToken;
     IERC20Upgradeable public rewardToken; // ADC Token
     address public rewardsSource; // ADCStakingRewards or Treasury
@@ -49,7 +52,7 @@ contract VaultWrapper is Initializable, UUPSUpgradeable, OwnableUpgradeable, Ree
         uint256 shares = totalShares == 0 ? amount : (amount * totalShares) / lpToken.balanceOf(address(this));
         require(shares > 0, "Insufficient shares minted");
 
-        lpToken.transferFrom(msg.sender, address(this), amount);
+        lpToken.safeTransferFrom(msg.sender, address(this), amount);
 
         userShares[msg.sender] += shares;
         totalShares += shares;
@@ -67,7 +70,7 @@ contract VaultWrapper is Initializable, UUPSUpgradeable, OwnableUpgradeable, Ree
         userShares[msg.sender] -= shares;
         totalShares -= shares;
 
-        lpToken.transfer(msg.sender, lpAmount);
+        lpToken.safeTransfer(msg.sender, lpAmount);
 
         emit Withdrawn(msg.sender, lpAmount, shares);
     }
@@ -80,7 +83,7 @@ contract VaultWrapper is Initializable, UUPSUpgradeable, OwnableUpgradeable, Ree
         uint256 newRewards = rewardToken.balanceOf(rewardsSource);
 
         if (newRewards > 0) {
-            require(rewardToken.transferFrom(rewardsSource, address(this), newRewards), "Reward transfer failed");
+            rewardToken.safeTransferFrom(rewardsSource, address(this), newRewards);
 
             accRewardPerShare += (newRewards * 1e18) / totalShares;
             emit RewardHarvested(newRewards, block.timestamp);
@@ -109,6 +112,6 @@ contract VaultWrapper is Initializable, UUPSUpgradeable, OwnableUpgradeable, Ree
 
         require(pending > 0, "No rewards to claim");
 
-        rewardToken.transfer(msg.sender, pending);
+        rewardToken.safeTransfer(msg.sender, pending);
     }
 }

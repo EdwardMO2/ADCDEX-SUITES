@@ -52,9 +52,17 @@ contract ComplianceLayer is
     uint256 private _blockedTransactions;
     uint256 private _frozenAccounts;
 
-    /// @dev compliance event log (user → events)
+    /// @dev Maximum number of on-chain events stored per user before rotation
+    uint256 public constant MAX_EVENT_LOG_SIZE = 1000;
+
+    /// @dev compliance event log (user → events), capped at MAX_EVENT_LOG_SIZE
     mapping(address => string[]) private _eventLog;
     mapping(address => uint256[]) private _eventTimestamps;
+    /// @dev write pointer per user for circular-buffer rotation
+    mapping(address => uint256) private _eventLogHead;
+
+    /// @dev ruleId → index+1 in _ruleIds array (0 means not present)
+    mapping(bytes32 => uint256) private _ruleIdIndex;
 
     address public timelock;
 
@@ -163,7 +171,7 @@ contract ComplianceLayer is
     {
         require(!_records[user].frozen, "Already frozen");
         _records[user].frozen = true;
-        _frozenAccounts++;
+        unchecked { _frozenAccounts++; }
 
         _logEvent(user, string(abi.encodePacked("Frozen: ", reason)));
         emit AccountFrozen(user, msg.sender, reason);
@@ -201,12 +209,14 @@ contract ComplianceLayer is
         (approved, ) = _screen(user, amount);
 
         if (!approved) {
-            _blockedTransactions++;
+            unchecked { _blockedTransactions++; }
             _logEvent(user, "TxBlocked");
             emit TransactionBlocked(user, txRef, "Compliance check failed");
         } else {
-            _totalTransactions++;
-            _totalVolume += amount;
+            unchecked {
+                _totalTransactions++;
+                _totalVolume += amount;
+            }
 
             // Reset daily volume if new day
             UserRecord storage rec = _records[user];
@@ -258,6 +268,7 @@ contract ComplianceLayer is
         require(!_rules[rule.id].active, "Rule already exists");
         _rules[rule.id] = rule;
         _ruleIds.push(rule.id);
+        _ruleIdIndex[rule.id] = _ruleIds.length; // store index+1
         emit ComplianceRuleAdded(rule.id, rule.name);
     }
 
@@ -270,15 +281,21 @@ contract ComplianceLayer is
 
     /// @inheritdoc ICompliance
     function removeRule(bytes32 ruleId) external override onlyRole(ADMIN_ROLE) {
-        require(_ruleExists(ruleId), "Rule not found");
+        uint256 indexPlusOne = _ruleIdIndex[ruleId];
+        require(indexPlusOne != 0, "Rule not found");
         delete _rules[ruleId];
-        for (uint256 i = 0; i < _ruleIds.length; i++) {
-            if (_ruleIds[i] == ruleId) {
-                _ruleIds[i] = _ruleIds[_ruleIds.length - 1];
-                _ruleIds.pop();
-                break;
-            }
+
+        // Swap-and-pop using cached index (O(1) instead of O(n))
+        uint256 idx = indexPlusOne - 1;
+        uint256 lastIdx = _ruleIds.length - 1;
+        if (idx != lastIdx) {
+            bytes32 lastId = _ruleIds[lastIdx];
+            _ruleIds[idx] = lastId;
+            _ruleIdIndex[lastId] = indexPlusOne; // keep same slot
         }
+        _ruleIds.pop();
+        delete _ruleIdIndex[ruleId];
+
         emit ComplianceRuleRemoved(ruleId);
     }
 
@@ -360,9 +377,14 @@ contract ComplianceLayer is
         if (rec.riskLevel == RiskLevel.Blocked) return (false, "High-risk account blocked");
 
         // Check active compliance rules
-        for (uint256 i = 0; i < _ruleIds.length; i++) {
-            ComplianceRule storage rule = _rules[_ruleIds[i]];
-            if (!rule.active) continue;
+        bytes32[] memory ruleIds = _ruleIds;
+        uint256 ruleCount = ruleIds.length;
+        for (uint256 i = 0; i < ruleCount; ) {
+            ComplianceRule storage rule = _rules[ruleIds[i]];
+            if (!rule.active) {
+                unchecked { ++i; }
+                continue;
+            }
 
             if (rule.maxTxAmount > 0 && amount > rule.maxTxAmount)
                 return (false, "Exceeds max transaction limit");
@@ -374,21 +396,31 @@ contract ComplianceLayer is
 
             if (uint8(rec.riskLevel) > uint8(rule.minRiskLevel))
                 return (false, "Risk level too high for rule");
+
+            unchecked { ++i; }
         }
 
         return (true, "");
     }
 
     function _logEvent(address user, string memory eventType) internal {
-        _eventLog[user].push(eventType);
-        _eventTimestamps[user].push(block.timestamp);
+        string[] storage log = _eventLog[user];
+        uint256[] storage ts = _eventTimestamps[user];
+
+        if (log.length < MAX_EVENT_LOG_SIZE) {
+            log.push(eventType);
+            ts.push(block.timestamp);
+        } else {
+            // Circular-buffer rotation: overwrite oldest entry
+            uint256 head = _eventLogHead[user];
+            log[head] = eventType;
+            ts[head] = block.timestamp;
+            unchecked { _eventLogHead[user] = (head + 1) % MAX_EVENT_LOG_SIZE; }
+        }
         emit ComplianceEventLogged(user, eventType, bytes32(0), block.timestamp);
     }
 
     function _ruleExists(bytes32 ruleId) internal view returns (bool) {
-        for (uint256 i = 0; i < _ruleIds.length; i++) {
-            if (_ruleIds[i] == ruleId) return true;
-        }
-        return false;
+        return _ruleIdIndex[ruleId] != 0;
     }
 }
