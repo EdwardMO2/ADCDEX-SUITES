@@ -152,6 +152,7 @@ contract MarginTradingPool is
         if (acct.borrowed > 0) {
             uint256 hf = _computeHealthFactor(acct.collateral, acct.borrowed);
             require(hf >= BPS, "MTP: health factor too low");
+            // Store computed value directly to avoid redundant _updateHealthFactor() call
             acct.healthFactor = hf;
         } else {
             acct.healthFactor = type(uint256).max;
