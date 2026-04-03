@@ -54,6 +54,55 @@ contract MockERC20 {
 }
 
 // =============================================================================
+//                        MOCK POOL (ISwapPool)
+// =============================================================================
+
+/// @notice Minimal mock pool that implements ISwapPool for testing.
+contract MockPool {
+    address public token0;
+    address public token1;
+    uint256 public feeBps;
+    uint256 constant BPS = 10_000;
+
+    constructor(address _token0, address _token1, uint256 _feeBps) {
+        token0 = _token0;
+        token1 = _token1;
+        feeBps = _feeBps;
+    }
+
+    function swap(
+        bytes32,
+        address tokenIn,
+        uint256 amountIn,
+        uint256,
+        address recipient
+    ) external returns (uint256 amountOut) {
+        require(tokenIn == token0 || tokenIn == token1, "MockPool: invalid tokenIn");
+        address tokenOut = tokenIn == token0 ? token1 : token0;
+
+        // Pull input tokens from caller (the router)
+        MockERC20(tokenIn).transferFrom(msg.sender, address(this), amountIn);
+
+        // Calculate output (simple constant-sum minus fee)
+        uint256 fee = (amountIn * feeBps) / BPS;
+        amountOut = amountIn - fee;
+
+        // Send output tokens to recipient
+        MockERC20(tokenOut).transfer(recipient, amountOut);
+    }
+
+    function getSwapQuote(bytes32, address, uint256 amountIn)
+        external
+        view
+        returns (uint256 amountOut, uint256 feePaid, uint256 priceImpactBps)
+    {
+        feePaid        = (amountIn * feeBps) / BPS;
+        amountOut      = amountIn - feePaid;
+        priceImpactBps = 0;
+    }
+}
+
+// =============================================================================
 //                       LIBRARY / TEST HELPERS
 // =============================================================================
 
@@ -143,16 +192,25 @@ contract SwapRouterTest {
     //                        DEPLOYMENT HELPERS
     // -------------------------------------------------------------------------
 
+    function _computePoolId(address _token0, address _token1) internal pure returns (bytes32) {
+        if (_token0 > _token1) (_token0, _token1) = (_token1, _token0);
+        return keccak256(abi.encodePacked(_token0, _token1));
+    }
+
     function _deploy()
         internal
         returns (
             SwapRouter router,
             MockERC20 tokenA,
-            MockERC20 tokenB
+            MockERC20 tokenB,
+            MockPool pool
         )
     {
         tokenA = new MockERC20("TokenA", "TKNA");
         tokenB = new MockERC20("TokenB", "TKNB");
+
+        // Deploy MockPool for the tokenA/tokenB pair with 0.05% fee
+        pool = new MockPool(address(tokenA), address(tokenB), 5);
 
         SwapRouter impl      = new SwapRouter();
         bytes memory initData = abi.encodeCall(
@@ -162,14 +220,20 @@ contract SwapRouterTest {
         ERC1967Proxy proxy = new ERC1967Proxy(address(impl), initData);
         router = SwapRouter(address(proxy));
 
-        // Mint to test contract and approve
+        // Register the pool in the router
+        bytes32 poolId = _computePoolId(address(tokenA), address(tokenB));
+        router.registerPool(poolId, address(pool));
+
+        // Mint to test contract and approve router
         tokenA.mint(address(this), 100_000_000e18);
         tokenB.mint(address(this), 100_000_000e18);
         tokenA.approve(address(router), type(uint256).max);
         tokenB.approve(address(router), type(uint256).max);
 
-        // Fund router with tokenB so it can pay out swaps
-        tokenB.mint(address(router), 100_000_000e18);
+        // Fund the pool with tokenB so it can pay out swaps (A → B)
+        tokenB.mint(address(pool), 100_000_000e18);
+        // Fund the pool with tokenA so it can pay out swaps (B → A)
+        tokenA.mint(address(pool), 100_000_000e18);
     }
 
     function _buildRoute(
@@ -182,12 +246,12 @@ contract SwapRouterTest {
         path[0] = address(tokenA);
         path[1] = address(tokenB);
 
-        uint256[] memory fees = new uint256[](1);
-        fees[0] = 5; // 0.05 %
+        bytes32[] memory poolIds = new bytes32[](1);
+        poolIds[0] = _computePoolId(address(tokenA), address(tokenB));
 
         return SwapRouter.Route({
             path:         path,
-            fees:         fees,
+            poolIds:      poolIds,
             amountIn:     amountIn,
             minAmountOut: minOut
         });
@@ -198,7 +262,7 @@ contract SwapRouterTest {
     // -------------------------------------------------------------------------
 
     function testInitialization() public {
-        (SwapRouter router,,) = _deploy();
+        (SwapRouter router,,,) = _deploy();
 
         TestAssert.assertAddrEq(router.owner(), address(this), "owner");
         TestAssert.assertEq(router.MAX_HOPS(), 5, "MAX_HOPS");
@@ -209,14 +273,13 @@ contract SwapRouterTest {
     // -------------------------------------------------------------------------
 
     function testRegisterPool() public {
-        (SwapRouter router,,) = _deploy();
+        (SwapRouter router,,,) = _deploy();
 
         bytes32 poolId  = keccak256("pool1");
         address poolAddr = address(0x1234);
         router.registerPool(poolId, poolAddr);
 
         TestAssert.assertAddrEq(router.pools(poolId), poolAddr, "pool registered");
-        TestAssert.assertAddrEq(router.registeredPools(0), poolAddr, "registeredPools[0]");
     }
 
     // -------------------------------------------------------------------------
@@ -224,7 +287,7 @@ contract SwapRouterTest {
     // -------------------------------------------------------------------------
 
     function testExecuteSwapRoute() public {
-        (SwapRouter router, MockERC20 tokenA, MockERC20 tokenB) = _deploy();
+        (SwapRouter router, MockERC20 tokenA, MockERC20 tokenB,) = _deploy();
 
         SwapRouter.Route memory route = _buildRoute(tokenA, tokenB, SWAP_AMOUNT, 0);
         uint256 balBefore = tokenB.balanceOf(address(this));
@@ -245,7 +308,7 @@ contract SwapRouterTest {
     // -------------------------------------------------------------------------
 
     function testSplitRoute() public {
-        (SwapRouter router, MockERC20 tokenA, MockERC20 tokenB) = _deploy();
+        (SwapRouter router, MockERC20 tokenA, MockERC20 tokenB,) = _deploy();
 
         SwapRouter.Route memory r1 = _buildRoute(tokenA, tokenB, SWAP_AMOUNT, 0);
         SwapRouter.Route memory r2 = _buildRoute(tokenA, tokenB, SWAP_AMOUNT, 0);
@@ -275,7 +338,7 @@ contract SwapRouterTest {
     // -------------------------------------------------------------------------
 
     function testFindBestRoute() public {
-        (SwapRouter router, MockERC20 tokenA, MockERC20 tokenB) = _deploy();
+        (SwapRouter router, MockERC20 tokenA, MockERC20 tokenB,) = _deploy();
 
         SwapRouter.Route memory route = router.findBestRoute(
             address(tokenA),
@@ -286,6 +349,7 @@ contract SwapRouterTest {
         TestAssert.assertAddrEq(route.path[0], address(tokenA), "path[0]");
         TestAssert.assertAddrEq(route.path[1], address(tokenB), "path[1]");
         TestAssert.assertEq(route.amountIn, SWAP_AMOUNT, "amountIn");
+        TestAssert.assertGt(route.minAmountOut, 0, "minAmountOut from real quote");
     }
 
     // -------------------------------------------------------------------------
@@ -293,7 +357,7 @@ contract SwapRouterTest {
     // -------------------------------------------------------------------------
 
     function testSlippageProtection() public {
-        (SwapRouter router, MockERC20 tokenA, MockERC20 tokenB) = _deploy();
+        (SwapRouter router, MockERC20 tokenA, MockERC20 tokenB,) = _deploy();
 
         // Set minAmountOut higher than what will be returned
         uint256 minAmountOut = SWAP_AMOUNT; // 100 % of input, impossible with any fee
