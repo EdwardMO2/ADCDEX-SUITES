@@ -35,10 +35,11 @@ contract TimelockController {
             _timeLockPeriod >= MIN_TIMELOCK_PERIOD && _timeLockPeriod <= MAX_TIMELOCK_PERIOD,
             "TimelockController: period out of range"
         );
-        for (uint256 i = 0; i < _owners.length; i++) {
+        for (uint256 i = 0; i < _owners.length; ) {
             require(_owners[i] != address(0), "Invalid owner");
             require(!isOwner[_owners[i]], "Duplicate owner");
             isOwner[_owners[i]] = true;
+            unchecked { ++i; }
         }
         owners = _owners;
         timeLockPeriod = _timeLockPeriod;
@@ -117,12 +118,14 @@ contract TimelockController {
         require(owners.length > 1, "Cannot remove last owner");
         delete queuedTransactions[txHash];
         isOwner[ownerToRemove] = false;
-        for (uint256 i = 0; i < owners.length; i++) {
+        uint256 len = owners.length;
+        for (uint256 i = 0; i < len; ) {
             if (owners[i] == ownerToRemove) {
-                owners[i] = owners[owners.length - 1];
+                owners[i] = owners[len - 1];
                 owners.pop();
                 break;
             }
+            unchecked { ++i; }
         }
         emit OwnerRemoved(ownerToRemove, block.timestamp);
     }
