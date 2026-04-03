@@ -8,10 +8,12 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import "./Interfaces/ISwapPool.sol";
 
 /// @title SwapRouter
 /// @notice Multi-hop swap routing engine.  Supports sequential single-path routes
-///         and weighted split routes across multiple pools.
+///         and weighted split routes across multiple pools.  Each hop is executed
+///         through a registered pool contract that implements ISwapPool.
 /// @dev    UUPSUpgradeable – upgrade through governance.
 contract SwapRouter is
     Initializable,
@@ -35,7 +37,7 @@ contract SwapRouter is
 
     struct Route {
         address[] path;          // Token path: [tokenIn, hop1, ..., tokenOut]
-        uint256[] fees;          // Fee for each hop in BPS (length = path.length - 1)
+        bytes32[] poolIds;       // Pool ID for each hop (length = path.length - 1)
         uint256   amountIn;
         uint256   minAmountOut;
     }
@@ -53,6 +55,8 @@ contract SwapRouter is
     mapping(bytes32 => address) public pools;
     /// @notice All registered pool addresses for iteration.
     address[] public registeredPools;
+    /// @notice All registered pool IDs for iteration.
+    bytes32[] public registeredPoolIds;
     /// @notice Address of the StablecoinPools contract (integration point).
     address public stablecoinPools;
 
@@ -110,6 +114,7 @@ contract SwapRouter is
         require(poolAddr != address(0), "SwapRouter: zero pool address");
         if (pools[poolId] == address(0)) {
             registeredPools.push(poolAddr);
+            registeredPoolIds.push(poolId);
         }
         pools[poolId] = poolAddr;
         emit PoolRegistered(poolId, poolAddr);
@@ -118,21 +123,11 @@ contract SwapRouter is
     // =========================================================================
     // Swap Execution
     // =========================================================================
-    //
-    // ⚠️  SECURITY NOTICE — SIMPLIFIED / TESTNET IMPLEMENTATION
-    // The swap functions below are a synthetic approximation: they deduct
-    // hop fees mathematically but do NOT call external pool contracts.
-    // Output tokens must already be held by this router contract.
-    // This design is acceptable for testnet and integration testing, but
-    // MUST be replaced with actual pool interactions before mainnet deployment.
-    //
-    // TODO: Integrate real pool contract calls (e.g. Uniswap v3/v4 style) on
-    //       each hop of the route before any production deployment.
 
     /// @notice Execute a multi-hop swap along a single route.
-    /// @dev    Simplified implementation: executes a direct transfer for each hop
-    ///         using the pool as a liquidity source.  A production implementation
-    ///         would call the pool's swap function on each hop.
+    /// @dev    Each hop is routed through the pool contract registered for the
+    ///         corresponding poolId.  The pool's own swap logic (AMM curve, fees,
+    ///         slippage) is applied on each hop.
     /// @param route        The route to execute.
     /// @param minAmountOut Minimum acceptable output; reverts if not met.
     /// @return amountOut   Actual output amount.
@@ -143,7 +138,7 @@ contract SwapRouter is
         uint256 hops = route.path.length;
         require(hops >= 2, "SwapRouter: path too short");
         require(hops - 1 <= MAX_HOPS, "SwapRouter: too many hops");
-        require(route.fees.length == hops - 1, "SwapRouter: fees length mismatch");
+        require(route.poolIds.length == hops - 1, "SwapRouter: poolIds length mismatch");
         require(route.amountIn > 0, "SwapRouter: zero amountIn");
 
         // Pull tokenIn from caller
@@ -156,17 +151,27 @@ contract SwapRouter is
         amountOut = route.amountIn;
         uint256 hopCount = hops - 1;
         for (uint256 i = 0; i < hopCount; ) {
-            // Deduct hop fee
-            uint256 fee = (amountOut * route.fees[i]) / BPS;
-            unchecked {
-                amountOut = amountOut - fee;
-                ++i;
-            }
+            address poolAddr = pools[route.poolIds[i]];
+            require(poolAddr != address(0), "SwapRouter: pool not registered");
+
+            // Approve the pool to spend the current hop's input token
+            IERC20Upgradeable(route.path[i]).forceApprove(poolAddr, amountOut);
+
+            // Execute the swap through the pool; output is sent back to this contract
+            amountOut = ISwapPool(poolAddr).swap(
+                route.poolIds[i],
+                route.path[i],
+                amountOut,
+                0,                // per-hop slippage deferred to final check
+                address(this)
+            );
+
+            unchecked { ++i; }
         }
 
         require(amountOut >= minAmountOut, "SwapRouter: insufficient output");
 
-        // Transfer final token out to caller (requires this contract holds the output token)
+        // Transfer final token out to caller
         IERC20Upgradeable(route.path[hops - 1]).safeTransfer(msg.sender, amountOut);
 
         emit SwapRouteExecuted(
@@ -179,6 +184,8 @@ contract SwapRouter is
     }
 
     /// @notice Execute a split swap across multiple weighted sub-routes.
+    /// @dev    All sub-routes must share the same input token.  The total input
+    ///         is split among sub-routes according to their weights.
     /// @param splitRoute  The split route definition.
     /// @return totalAmountOut  Combined output across all sub-routes.
     function executeSplitRoute(
@@ -195,9 +202,17 @@ contract SwapRouter is
         }
         require(totalWeight == BPS, "SwapRouter: weights must sum to BPS");
 
-        // Determine total amountIn from first route (all routes share the same input token)
+        // All sub-routes must share the same input token
         uint256 totalIn = splitRoute.routes[0].amountIn;
         address tokenIn = splitRoute.routes[0].path[0];
+
+        for (uint256 i = 1; i < numRoutes; ) {
+            require(
+                splitRoute.routes[i].path[0] == tokenIn,
+                "SwapRouter: all sub-routes must share the same input token"
+            );
+            unchecked { ++i; }
+        }
 
         IERC20Upgradeable(tokenIn).safeTransferFrom(msg.sender, address(this), totalIn);
 
@@ -207,12 +222,23 @@ contract SwapRouter is
 
             uint256 hopOut = splitAmt;
             uint256 hops   = r.path.length;
+
+            // Execute each hop through its registered pool
             for (uint256 j = 0; j < hops - 1; ) {
-                uint256 fee = (hopOut * r.fees[j]) / BPS;
-                unchecked {
-                    hopOut = hopOut - fee;
-                    ++j;
-                }
+                address poolAddr = pools[r.poolIds[j]];
+                require(poolAddr != address(0), "SwapRouter: pool not registered");
+
+                IERC20Upgradeable(r.path[j]).forceApprove(poolAddr, hopOut);
+
+                hopOut = ISwapPool(poolAddr).swap(
+                    r.poolIds[j],
+                    r.path[j],
+                    hopOut,
+                    0,
+                    address(this)
+                );
+
+                unchecked { ++j; }
             }
 
             if (hopOut > 0) {
@@ -229,30 +255,89 @@ contract SwapRouter is
     // Quote / Route Finding
     // =========================================================================
 
-    /// @notice Return a simplified 2-token route through any registered pool.
-    /// @dev    View function only – returns a best-effort single-hop route.
+    /// @notice Find the best single-hop route between two tokens by querying all
+    ///         registered pools for quotes and returning the one with the highest
+    ///         expected output.
     /// @param tokenIn   Input token.
     /// @param tokenOut  Output token.
     /// @param amountIn  Amount of tokenIn.
-    /// @return route    A single-hop route between tokenIn and tokenOut.
+    /// @return route    The best single-hop route found; reverts if no pool exists
+    ///                  for the pair.
     function findBestRoute(
         address tokenIn,
         address tokenOut,
         uint256 amountIn
-    ) external pure returns (Route memory route) {
+    ) external view returns (Route memory route) {
+        require(tokenIn != address(0) && tokenOut != address(0), "SwapRouter: zero token address");
+        require(amountIn > 0, "SwapRouter: zero amountIn");
+
+        uint256 bestOutput;
+        bytes32 bestPoolId;
+        uint256 numPools = registeredPoolIds.length;
+
+        for (uint256 i = 0; i < numPools; ) {
+            bytes32 pid = registeredPoolIds[i];
+            address poolAddr = pools[pid];
+            if (poolAddr != address(0)) {
+                // Try to get a quote; skip if the pool reverts (pair not supported)
+                try ISwapPool(poolAddr).getSwapQuote(pid, tokenIn, amountIn)
+                    returns (uint256 out, uint256, uint256)
+                {
+                    if (out > bestOutput) {
+                        bestOutput = out;
+                        bestPoolId = pid;
+                    }
+                } catch {
+                    // Pool does not support this pair – skip
+                }
+            }
+            unchecked { ++i; }
+        }
+
+        // Also try a deterministic poolId derived from the sorted token pair
+        bytes32 derivedId = _computePoolId(tokenIn, tokenOut);
+        address derivedPool = pools[derivedId];
+        if (derivedPool != address(0)) {
+            try ISwapPool(derivedPool).getSwapQuote(derivedId, tokenIn, amountIn)
+                returns (uint256 out, uint256, uint256)
+            {
+                if (out > bestOutput) {
+                    bestOutput = out;
+                    bestPoolId = derivedId;
+                }
+            } catch {}
+        }
+
+        require(bestOutput > 0, "SwapRouter: no pool found for pair");
+
         address[] memory path = new address[](2);
         path[0] = tokenIn;
         path[1] = tokenOut;
 
-        uint256[] memory fees = new uint256[](1);
-        fees[0] = 5; // default 0.05 % fee
+        bytes32[] memory pids = new bytes32[](1);
+        pids[0] = bestPoolId;
 
         route = Route({
             path:         path,
-            fees:         fees,
+            poolIds:      pids,
             amountIn:     amountIn,
-            minAmountOut: 0
+            minAmountOut: bestOutput
         });
+    }
+
+    // =========================================================================
+    // Helpers
+    // =========================================================================
+
+    /// @notice Compute a deterministic pool ID from a token pair.
+    /// @dev    Sorts the two addresses before hashing, matching the convention
+    ///         used by StablecoinPools.getPoolId().
+    /// @param token0 First token address.
+    /// @param token1 Second token address.
+    /// @return Pool ID as keccak256 of the sorted, packed addresses.
+    function _computePoolId(address token0, address token1) internal pure returns (bytes32) {
+        if (token0 > token1) (token0, token1) = (token1, token0);
+        return keccak256(abi.encodePacked(token0, token1));
     }
 
     // =========================================================================
