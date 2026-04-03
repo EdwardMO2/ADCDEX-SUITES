@@ -310,6 +310,33 @@ contract MultiPoolStakingRewards is
         _safeRewardTransfer(msg.sender, boosted, poolId);
     }
 
+    /// @notice Claim rewards from multiple pools in a single transaction.
+    /// @param poolIds Array of pool IDs to claim from.
+    function claimMultiple(uint256[] calldata poolIds) external nonReentrant {
+        uint256 len = poolIds.length;
+        require(len > 0 && len <= 20, "Invalid pool count");
+        for (uint256 i = 0; i < len; ) {
+            uint256 poolId = poolIds[i];
+            if (poolId >= pools.length) revert InvalidPool(poolId);
+
+            _updatePool(poolId);
+
+            PoolInfo storage pool = pools[poolId];
+            UserStakeInfo storage userStake = userStakes[msg.sender][poolId];
+
+            uint256 pending = _calcPendingBase(userStake, pool);
+            if (pending > 0) {
+                userStake.rewardDebt =
+                    (userStake.amount * pool.accRewardPerShare) /
+                    PRECISION;
+
+                uint256 boosted = _applyNFTBoost(msg.sender, pending);
+                _safeRewardTransfer(msg.sender, boosted, poolId);
+            }
+            unchecked { ++i; }
+        }
+    }
+
     /// @inheritdoc IMultiPoolStakingRewards
     function emergencyWithdraw(uint256 poolId) external nonReentrant {
         if (poolId >= pools.length) revert InvalidPool(poolId);
@@ -379,7 +406,7 @@ contract MultiPoolStakingRewards is
         address user,
         uint256 poolId
     ) external view returns (uint256) {
-        if (poolId >= pools.length) return 0;
+        if (poolId >= pools.length) revert InvalidPool(poolId);
 
         PoolInfo storage pool = pools[poolId];
         UserStakeInfo storage userStake = userStakes[user][poolId];
@@ -483,13 +510,17 @@ contract MultiPoolStakingRewards is
     }
 
     /// @notice Calculate the NFT boost in BPS for a given user.
-    /// @dev    Returns 0 when no NFT contract is configured or balance is zero.
+    /// @dev    Returns 0 when no NFT contract is configured, balance is zero,
+    ///         or the external balanceOf call reverts (graceful degradation).
     function _calcNFTBoostBps(address user) internal view returns (uint256) {
         if (address(nftContract) == address(0)) return 0;
-        uint256 balance = nftContract.balanceOf(user);
-        if (balance == 0) return 0;
-        uint256 boost = balance * NFT_BOOST_PER_TOKEN_BPS;
-        return boost > MAX_NFT_BOOST_BPS ? MAX_NFT_BOOST_BPS : boost;
+        try nftContract.balanceOf(user) returns (uint256 balance) {
+            if (balance == 0) return 0;
+            uint256 boost = balance * NFT_BOOST_PER_TOKEN_BPS;
+            return boost > MAX_NFT_BOOST_BPS ? MAX_NFT_BOOST_BPS : boost;
+        } catch {
+            return 0;
+        }
     }
 
     /// @notice Transfer reward tokens to a recipient, capping at available

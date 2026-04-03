@@ -205,6 +205,12 @@ interface IMultiPoolStakingRewards {
     /// @param poolId Pool to claim rewards from.
     function claim(uint256 poolId) external;
 
+    /// @notice Claim rewards from multiple pools in a single transaction.
+    /// @dev Emits {RewardsClaimed} for each pool with pending rewards.
+    ///      Skips pools with no pending rewards (no revert).
+    /// @param poolIds Array of pool IDs to claim from (max 20).
+    function claimMultiple(uint256[] calldata poolIds) external;
+
     /// @notice Withdraw the entire stake immediately, forfeiting all accrued
     ///         rewards.
     /// @dev Emits {EmergencyWithdraw}.
