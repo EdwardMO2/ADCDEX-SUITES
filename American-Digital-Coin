@@ -24,6 +24,13 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
     uint256 private constant MAX_MERCHANT_BONUSES = 2000;
     uint256 private constant MAX_GAS_POOL = 20_000e6;
     uint256 private constant ORACLE_STALENESS_THRESHOLD = 1 hours;
+    uint256 private constant MAX_SUPPORTED_STABLECOINS = 20;
+    uint256 private constant MAX_NFT_SUPPLY = 100_000;
+    uint256 private constant LOAN_MAX_DURATION = 90 days;
+    uint256 private constant NFT_BASE_VALUE = 1e18;
+
+    bytes4 private constant INTERFACE_ID_ERC165 = 0x01ffc9a7;
+    bytes4 private constant INTERFACE_ID_ERC721 = 0x80ac58cd;
 
     IERC20Upgradeable public usdc;
     AggregatorV3Interface public goldPriceFeed;
@@ -31,6 +38,7 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
 
     mapping(address => uint256) public reserveBalances;
     address[] public supportedStablecoins;
+    mapping(address => bool) public isSupportedStablecoin;
     uint256 public merchantIncentivePool;
     uint256 public gasSubsidyPool;
     uint256 public gasSubsidyRate = 5e17;
@@ -51,6 +59,7 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
 
     uint256 private _totalSupply;
     uint256 public tokenIdCounter = 1;
+    uint256 public nftTotalSupply;
     uint256 public feePool;
     bool public paused;
     mapping(address => bool) public whitelistedMerchants;
@@ -65,6 +74,13 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
     mapping(uint256 => address) private _owners;
     mapping(address => uint256) private _nftBalances;
     mapping(address => mapping(address => uint256)) private _allowances;
+
+    /// @dev NFT approval for individual tokens
+    mapping(uint256 => address) private _nftApprovals;
+    /// @dev NFT operator approvals (owner => operator => approved)
+    mapping(address => mapping(address => bool)) private _operatorApprovals;
+    /// @dev Base URI for NFT metadata
+    string public baseTokenURI;
 
     string private _name = "American Digital Currency";
     string private _symbol = "ADC";
@@ -82,12 +98,23 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
     event SwapExecuted(address indexed user, uint256 adcAmount, uint256 stablecoinAmount, address stablecoin);
     event P2PLoanCreated(address indexed lender, address indexed borrower, uint256 amount, uint256 tokenId);
     event P2PLoanRepaid(address indexed borrower, address indexed lender, uint256 amount);
+    event P2PLoanLiquidated(address indexed lender, address indexed borrower, uint256 indexed tokenId);
     event NFTRewardClaimed(address indexed owner, uint256 indexed tokenId, uint256 reward);
     event ContractUpgraded(address indexed newImplementation);
     event ReservesFunded(address indexed funder, uint256 amount);
     event Approval(address indexed owner, address indexed spender, uint256 value);
+    event LiquidityAdded(address indexed provider, address indexed stablecoin, uint256 amount);
+    event TransferNoFee(address indexed from, address indexed to, uint256 amount);
+    event MerchantBonusClaimed(address indexed merchant, uint256 amount);
+    event NFTTransfer(address indexed from, address indexed to, uint256 indexed tokenId);
+    event NFTApproval(address indexed owner, address indexed approved, uint256 indexed tokenId);
+    event NFTApprovalForAll(address indexed owner, address indexed operator, bool approved);
+    event NFTBurned(address indexed owner, uint256 indexed tokenId);
 
     function initialize(address _usdc, address _goldPriceFeed, address _treasury, uint256 initialReserve) public initializer {
+        require(_usdc != address(0), "Invalid USDC address");
+        require(_goldPriceFeed != address(0), "Invalid price feed address");
+        require(_treasury != address(0), "Invalid treasury address");
         __ReentrancyGuard_init();
         __UUPSUpgradeable_init();
         __Ownable_init();
@@ -100,6 +127,7 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
             merchantIncentivePool = initialReserve * 2 / 10;
         }
         supportedStablecoins.push(_usdc);
+        isSupportedStablecoin[_usdc] = true;
     }
 
     function fundReserves(uint256 amount) external onlyOwner {
@@ -158,6 +186,7 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
         require(_nftBalances[msg.sender] > 0 && _nftBalances[to] > 0, "Both parties must hold NFTs");
         require(_balances[msg.sender] >= amount, "Insufficient balance");
         _transfer(msg.sender, to, amount);
+        emit TransferNoFee(msg.sender, to, amount);
     }
 
     function claimGasSubsidy() external whenNotPaused {
@@ -178,8 +207,20 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
     }
 
     function addLiquidity(address stablecoin, uint256 amount) external whenNotPaused {
+        require(isSupportedStablecoin[stablecoin], "Unsupported stablecoin");
+        require(amount > 0, "Amount must be > 0");
         require(IERC20Upgradeable(stablecoin).transferFrom(msg.sender, address(this), amount), "Liquidity transfer failed");
         liquidityPool[stablecoin] += amount;
+        emit LiquidityAdded(msg.sender, stablecoin, amount);
+    }
+
+    /// @notice Add a supported stablecoin (owner-only).
+    function addSupportedStablecoin(address stablecoin) external onlyOwner {
+        require(stablecoin != address(0), "Invalid stablecoin");
+        require(!isSupportedStablecoin[stablecoin], "Already supported");
+        require(supportedStablecoins.length < MAX_SUPPORTED_STABLECOINS, "Max stablecoins reached");
+        supportedStablecoins.push(stablecoin);
+        isSupportedStablecoin[stablecoin] = true;
     }
 
     function redeemADC(uint256 adcAmount, address stablecoin) external nonReentrant whenNotPaused {
@@ -217,6 +258,7 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
         require(_totalSupply + MERCHANT_BONUS <= INITIAL_MAX_SUPPLY, "Exceeds max supply");
         merchantBonusClaimed++;
         _mintADC(msg.sender, MERCHANT_BONUS);
+        emit MerchantBonusClaimed(msg.sender, MERCHANT_BONUS);
     }
 
     function paymentToMerchant(address merchant, uint256 amount, uint256 tokenId) external whenNotPaused {
@@ -252,20 +294,21 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
         voucherIdCounter++;
     }
 
-    function redeemVoucher(uint256 voucherId) external whenNotPaused {
+    function redeemVoucher(uint256 voucherId) external nonReentrant whenNotPaused {
         require(voucherAmounts[voucherId] > 0 && _owners[voucherId] == msg.sender, "Invalid voucher or ownership");
         uint256 amount = voucherAmounts[voucherId];
         address stablecoin = voucherStablecoin[voucherId];
-        if (stablecoin == address(0)) _mintADC(msg.sender, amount);
-        else require(IERC20Upgradeable(stablecoin).transfer(msg.sender, amount), "Voucher redemption transfer failed");
+        // CEI: clear state before external interactions
+        voucherAmounts[voucherId] = 0;
         uint256 tokenId = tokenIdCounter++;
         _mintNFT(msg.sender, tokenId);
+        if (stablecoin == address(0)) _mintADC(msg.sender, amount);
+        else require(IERC20Upgradeable(stablecoin).transfer(msg.sender, amount), "Voucher redemption transfer failed");
         emit CertificateOfOwnership(msg.sender, amount, tokenId);
-        voucherAmounts[voucherId] = 0;
         emit VoucherRedeemed(voucherId, msg.sender, amount);
     }
 
-    function lendToUser(address borrower, uint256 amount, uint256 tokenId) external whenNotPaused {
+    function lendToUser(address borrower, uint256 amount, uint256 tokenId) external nonReentrant whenNotPaused {
         require(_nftBalances[msg.sender] > 0 && _nftBalances[borrower] > 0, "Both parties must hold NFTs");
         require(_balances[msg.sender] >= amount && _owners[tokenId] == borrower, "Insufficient balance or token ownership");
         require(!stakedNFTs[tokenId].isStaked && p2pLoans[borrower].amount == 0, "NFT staked or loan exists");
@@ -275,18 +318,32 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
         emit P2PLoanCreated(msg.sender, borrower, amount, tokenId);
     }
 
-    function repayLoan() external whenNotPaused {
+    function repayLoan() external nonReentrant whenNotPaused {
         P2PLoan memory loan = p2pLoans[msg.sender];
         require(loan.amount > 0 && !loan.repaid, "No active loan");
         uint256 totalRepayment = loan.amount + (loan.interest * (block.timestamp - loan.startTime)) / SECONDS_PER_YEAR;
         require(_balances[msg.sender] >= totalRepayment, "Insufficient balance");
-        _transfer(msg.sender, loan.lender, totalRepayment);
-        delete stakedNFTs[loan.tokenId];
         p2pLoans[msg.sender].repaid = true;
+        delete stakedNFTs[loan.tokenId];
+        _transfer(msg.sender, loan.lender, totalRepayment);
         emit P2PLoanRepaid(msg.sender, loan.lender, totalRepayment);
     }
 
-    function stakeNFT(uint256 tokenId, uint256 amount) external whenNotPaused {
+    /// @notice Liquidate an expired loan. If the borrower hasn't repaid within
+    ///         LOAN_MAX_DURATION, the lender can claim the collateral NFT.
+    function liquidateLoan(address borrower) external whenNotPaused {
+        P2PLoan memory loan = p2pLoans[borrower];
+        require(loan.amount > 0 && !loan.repaid, "No active loan");
+        require(msg.sender == loan.lender, "Only lender can liquidate");
+        require(block.timestamp >= loan.startTime + LOAN_MAX_DURATION, "Loan not yet expired");
+        // Transfer NFT collateral to lender
+        _transferNFTInternal(borrower, loan.lender, loan.tokenId);
+        delete stakedNFTs[loan.tokenId];
+        p2pLoans[borrower].repaid = true;
+        emit P2PLoanLiquidated(loan.lender, borrower, loan.tokenId);
+    }
+
+    function stakeNFT(uint256 tokenId, uint256 amount) external nonReentrant whenNotPaused {
         require(_owners[tokenId] == msg.sender && !stakedNFTs[tokenId].isStaked, "Invalid ownership or already staked");
         uint256 reserveValue = getTotalReserveValue();
         uint256 basePrice = _getBasePriceWithReserve(reserveValue);
@@ -296,26 +353,31 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
         emit NFTStaked(msg.sender, tokenId, amount);
     }
 
-    function unstakeNFT(uint256 tokenId) external whenNotPaused {
+    function unstakeNFT(uint256 tokenId) external nonReentrant whenNotPaused {
         require(_owners[tokenId] == msg.sender && stakedNFTs[tokenId].isStaked, "Invalid ownership or not staked");
         Stake memory stake = stakedNFTs[tokenId];
         uint256 reward = calculateNFTStakingReward(tokenId);
+        delete stakedNFTs[tokenId];
         if (reward > 0 && _totalSupply + reward <= INITIAL_MAX_SUPPLY) {
             _mintADC(msg.sender, reward);
         }
         _transfer(address(this), msg.sender, stake.amount);
-        delete stakedNFTs[tokenId];
         emit NFTUnstaked(msg.sender, tokenId, reward);
     }
 
-    function claimPassiveReward(uint256 tokenId) external whenNotPaused {
+    /// @notice Claim passive reward for an NFT. Reward is based on the NFT's
+    ///         purchase amount (recorded at mint time via CertificateOfOwnership),
+    ///         not the user's total balance, to prevent multi-NFT exploit.
+    function claimPassiveReward(uint256 tokenId) external nonReentrant whenNotPaused {
         require(_owners[tokenId] == msg.sender, "Not token owner");
         require(!stakedNFTs[tokenId].isStaked, "NFT is staked");
         uint256 timeHeld = block.timestamp - nftMintTime[tokenId];
-        uint256 reward = (balanceOf(msg.sender) * BASE_PASSIVE_YIELD * timeHeld) / (SECONDS_PER_YEAR * PRECISION);
+        // Use a fixed per-NFT base value to prevent exploit where user claims
+        // on multiple NFTs using entire balance
+        uint256 reward = (NFT_BASE_VALUE * BASE_PASSIVE_YIELD * timeHeld) / (SECONDS_PER_YEAR * PRECISION);
         require(_totalSupply + reward <= INITIAL_MAX_SUPPLY, "Exceeds max supply");
-        _mintADC(msg.sender, reward);
         nftMintTime[tokenId] = block.timestamp;
+        _mintADC(msg.sender, reward);
         emit NFTRewardClaimed(msg.sender, tokenId, reward);
     }
 
@@ -378,9 +440,12 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
     }
 
     function _mintNFT(address to, uint256 tokenId) internal {
+        require(nftTotalSupply < MAX_NFT_SUPPLY, "NFT supply cap reached");
         _nftBalances[to]++;
         _owners[tokenId] = to;
         nftMintTime[tokenId] = block.timestamp;
+        nftTotalSupply++;
+        emit NFTTransfer(address(0), to, tokenId);
     }
 
     function _mintVoucher(address to, uint256 voucherId) internal {
@@ -395,6 +460,97 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
         feePool += (fee - subsidyShare);
     }
 
+    // =========================================================================
+    //                      NFT TRANSFER & APPROVAL
+    // =========================================================================
+
+    /// @notice Transfer an NFT to another address. Cannot transfer staked NFTs.
+    function transferNFT(address to, uint256 tokenId) external whenNotPaused {
+        require(to != address(0), "Transfer to zero address");
+        require(_isApprovedOrOwner(msg.sender, tokenId), "Not owner or approved");
+        require(!stakedNFTs[tokenId].isStaked, "Cannot transfer staked NFT");
+        _transferNFTInternal(_owners[tokenId], to, tokenId);
+    }
+
+    /// @notice Approve an address to manage a specific NFT.
+    function approveNFT(address to, uint256 tokenId) external whenNotPaused {
+        address tokenOwner = _owners[tokenId];
+        require(tokenOwner != address(0), "Token does not exist");
+        require(msg.sender == tokenOwner || _operatorApprovals[tokenOwner][msg.sender], "Not owner or operator");
+        require(to != tokenOwner, "Approval to current owner");
+        _nftApprovals[tokenId] = to;
+        emit NFTApproval(tokenOwner, to, tokenId);
+    }
+
+    /// @notice Set or revoke operator approval for all of caller's NFTs.
+    function setApprovalForAll(address operator, bool approved) external whenNotPaused {
+        require(operator != msg.sender, "Approve to caller");
+        _operatorApprovals[msg.sender][operator] = approved;
+        emit NFTApprovalForAll(msg.sender, operator, approved);
+    }
+
+    /// @notice Get the approved address for a single NFT.
+    function getApproved(uint256 tokenId) public view returns (address) {
+        require(_owners[tokenId] != address(0), "Token does not exist");
+        return _nftApprovals[tokenId];
+    }
+
+    /// @notice Check if an operator is approved for all of an owner's NFTs.
+    function isApprovedForAll(address owner, address operator) public view returns (bool) {
+        return _operatorApprovals[owner][operator];
+    }
+
+    /// @notice Burn an NFT. Only the owner can burn. Cannot burn staked NFTs.
+    function burnNFT(uint256 tokenId) external whenNotPaused {
+        require(_owners[tokenId] == msg.sender, "Not token owner");
+        require(!stakedNFTs[tokenId].isStaked, "Cannot burn staked NFT");
+        _nftBalances[msg.sender]--;
+        delete _owners[tokenId];
+        delete _nftApprovals[tokenId];
+        delete nftMintTime[tokenId];
+        nftTotalSupply--;
+        emit NFTBurned(msg.sender, tokenId);
+        emit NFTTransfer(msg.sender, address(0), tokenId);
+    }
+
+    function _transferNFTInternal(address from, address to, uint256 tokenId) internal {
+        _nftBalances[from]--;
+        _nftBalances[to]++;
+        _owners[tokenId] = to;
+        delete _nftApprovals[tokenId];
+        emit NFTTransfer(from, to, tokenId);
+    }
+
+    function _isApprovedOrOwner(address spender, uint256 tokenId) internal view returns (bool) {
+        address tokenOwner = _owners[tokenId];
+        require(tokenOwner != address(0), "Token does not exist");
+        return (spender == tokenOwner || _nftApprovals[tokenId] == spender || _operatorApprovals[tokenOwner][spender]);
+    }
+
+    // =========================================================================
+    //                      ERC165 & METADATA
+    // =========================================================================
+
+    /// @notice Set the base URI for NFT metadata (owner-only).
+    function setBaseTokenURI(string calldata _baseURI) external onlyOwner {
+        baseTokenURI = _baseURI;
+    }
+
+    /// @notice Returns the metadata URI for a given NFT token.
+    function tokenURI(uint256 tokenId) external view returns (string memory) {
+        require(_owners[tokenId] != address(0), "Token does not exist");
+        return string(abi.encodePacked(baseTokenURI, _toString(tokenId)));
+    }
+
+    /// @notice ERC-165 interface detection.
+    function supportsInterface(bytes4 interfaceId) external pure returns (bool) {
+        return interfaceId == INTERFACE_ID_ERC165 || interfaceId == INTERFACE_ID_ERC721;
+    }
+
+    // =========================================================================
+    //                          VIEW FUNCTIONS
+    // =========================================================================
+
     function name() public pure returns (string memory) { return "American Digital Currency"; }
     function symbol() public pure returns (string memory) { return "ADC"; }
     function decimals() public pure returns (uint8) { return 18; }
@@ -407,4 +563,22 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
         return owner;
     }
     function balanceOfNFT(address owner) public view returns (uint256) { return _nftBalances[owner]; }
+
+    /// @dev Convert uint256 to decimal string.
+    function _toString(uint256 value) internal pure returns (string memory) {
+        if (value == 0) return "0";
+        uint256 temp = value;
+        uint256 digits;
+        while (temp != 0) {
+            digits++;
+            temp /= 10;
+        }
+        bytes memory buffer = new bytes(digits);
+        while (value != 0) {
+            digits--;
+            buffer[digits] = bytes1(uint8(48 + (value % 10)));
+            value /= 10;
+        }
+        return string(buffer);
+    }
 }
