@@ -82,16 +82,22 @@ contract RouterQuote is
         require(route.amountIn > 0, "RouterQuote: zero amountIn");
 
         // Validate all token addresses in path are non-zero
-        for (uint256 i = 0; i < hops; i++) {
+        // and calculate fees in a single pass
+        for (uint256 i = 0; i < hops; ) {
             require(route.path[i] != address(0), "RouterQuote: zero token address in path");
+            unchecked { ++i; }
         }
 
         estimatedOut = route.amountIn;
-        for (uint256 i = 0; i < hops - 1; i++) {
+        uint256 hopCount = hops - 1;
+        for (uint256 i = 0; i < hopCount; ) {
             require(route.fees[i] <= BPS, "RouterQuote: fee exceeds 100%");
             uint256 fee  = (estimatedOut * route.fees[i]) / BPS;
             totalFees   += fee;
-            estimatedOut = estimatedOut - fee;
+            unchecked {
+                estimatedOut = estimatedOut - fee;
+                ++i;
+            }
         }
 
         priceImpactBps = (totalFees * BPS) / route.amountIn;
@@ -111,25 +117,30 @@ contract RouterQuote is
         require(numRoutes == splitRoute.weights.length, "RouterQuote: weights mismatch");
 
         uint256 totalWeight;
-        for (uint256 i = 0; i < numRoutes; i++) {
+        for (uint256 i = 0; i < numRoutes; ) {
             totalWeight += splitRoute.weights[i];
+            unchecked { ++i; }
         }
         require(totalWeight == BPS, "RouterQuote: weights must sum to BPS");
 
         uint256 totalIn = splitRoute.routes[0].amountIn;
 
-        for (uint256 i = 0; i < numRoutes; i++) {
-            SwapRouter.Route memory r = splitRoute.routes[i];
+        for (uint256 i = 0; i < numRoutes; ) {
+            SwapRouter.Route calldata r = splitRoute.routes[i];
             uint256 splitAmt = (totalIn * splitRoute.weights[i]) / BPS;
 
             uint256 hopOut = splitAmt;
             uint256 hops   = r.path.length;
-            for (uint256 j = 0; j < hops - 1; j++) {
+            for (uint256 j = 0; j < hops - 1; ) {
                 require(r.fees[j] <= BPS, "RouterQuote: fee exceeds 100%");
                 uint256 fee = (hopOut * r.fees[j]) / BPS;
-                hopOut      = hopOut - fee;
+                unchecked {
+                    hopOut = hopOut - fee;
+                    ++j;
+                }
             }
             estimatedOut += hopOut;
+            unchecked { ++i; }
         }
 
         emit QuoteGenerated(msg.sender, estimatedOut, 0, 0);

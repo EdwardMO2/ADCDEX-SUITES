@@ -108,7 +108,8 @@ contract FlashLoanProvider is
         require(amount > 0, "FlashLoanProvider: zero amount");
         require(receiver != address(0), "FlashLoanProvider: zero receiver");
 
-        uint256 fee = (amount * FLASH_LOAN_FEE_BPS) / BPS;
+        uint256 fee;
+        unchecked { fee = (amount * FLASH_LOAN_FEE_BPS) / BPS; }
         uint256 balanceBefore = IERC20Upgradeable(token).balanceOf(address(this));
 
         require(balanceBefore >= amount, "FlashLoanProvider: insufficient liquidity");

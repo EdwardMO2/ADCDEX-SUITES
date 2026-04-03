@@ -146,15 +146,18 @@ contract MarginTradingPool is
         UserMarginAccount storage acct = accounts[msg.sender];
         require(acct.collateral >= amount, "MTP: insufficient collateral");
 
-        acct.collateral -= amount;
+        unchecked { acct.collateral -= amount; }
 
         // Ensure account remains healthy after withdrawal
         if (acct.borrowed > 0) {
             uint256 hf = _computeHealthFactor(acct.collateral, acct.borrowed);
             require(hf >= BPS, "MTP: health factor too low");
+            // Store computed value directly to avoid redundant _updateHealthFactor() call
+            acct.healthFactor = hf;
+        } else {
+            acct.healthFactor = type(uint256).max;
         }
 
-        _updateHealthFactor(msg.sender);
         IERC20Upgradeable(collateralToken).safeTransfer(msg.sender, amount);
         emit CollateralWithdrawn(msg.sender, amount);
     }
@@ -197,7 +200,7 @@ contract MarginTradingPool is
         require(acct.borrowed > 0, "MTP: no debt");
 
         uint256 repayAmount = amount > acct.borrowed ? acct.borrowed : amount;
-        acct.borrowed -= repayAmount;
+        unchecked { acct.borrowed -= repayAmount; }
 
         _updateHealthFactor(msg.sender);
         IERC20Upgradeable(borrowToken).safeTransferFrom(msg.sender, address(this), repayAmount);
@@ -278,7 +281,7 @@ contract MarginTradingPool is
         if (elapsed == 0) return;
 
         uint256 interest = (acct.borrowed * INTEREST_RATE_PER_SECOND * elapsed) / PRECISION;
-        acct.borrowed         += interest;
+        unchecked { acct.borrowed += interest; }
         acct.lastInterestTime  = block.timestamp;
     }
 
