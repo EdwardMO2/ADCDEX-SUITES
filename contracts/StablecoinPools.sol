@@ -578,7 +578,7 @@ contract StablecoinPools is
             uint256 currentReserve0 = _pools[poolId].reserve0;
             uint256 currentReserve1 = _pools[poolId].reserve1;
             if (currentReserve0 > 0 && currentReserve1 > 0) {
-                // Ensure new reserves are within MAX_RESERVE_CHANGE_BPS of current
+                // Ensure new reserves are within MAX_RESERVE_CHANGE_BPS of current (upper bound)
                 require(
                     reserve0 <= (currentReserve0 * MAX_RESERVE_CHANGE_BPS) / BPS,
                     "Reserve0 change too large"
@@ -586,6 +586,15 @@ contract StablecoinPools is
                 require(
                     reserve1 <= (currentReserve1 * MAX_RESERVE_CHANGE_BPS) / BPS,
                     "Reserve1 change too large"
+                );
+                // Lower bound: reserves cannot drop below 50% of current
+                require(
+                    reserve0 >= currentReserve0 / 2,
+                    "Reserve0 drop too large"
+                );
+                require(
+                    reserve1 >= currentReserve1 / 2,
+                    "Reserve1 drop too large"
                 );
                 // Ensure reserves don't drop to zero if they were non-zero
                 require(reserve0 > 0 && reserve1 > 0, "Reserves cannot drop to zero");
@@ -650,7 +659,12 @@ contract StablecoinPools is
             : 0;          // ring buffer not yet full, oldest is at 0
 
         // Get most recent observation (one before current write index)
-        uint256 newestIdx = currentIdx == 0 ? (count >= TWAP_BUFFER_SIZE ? TWAP_BUFFER_SIZE - 1 : count - 1) : currentIdx - 1;
+        uint256 newestIdx;
+        if (currentIdx == 0) {
+            newestIdx = count >= TWAP_BUFFER_SIZE ? TWAP_BUFFER_SIZE - 1 : count - 1;
+        } else {
+            newestIdx = currentIdx - 1;
+        }
 
         TWAPObservation storage oldest = twapObservations[poolId][oldestIdx];
         TWAPObservation storage newest = twapObservations[poolId][newestIdx];
@@ -717,6 +731,8 @@ contract StablecoinPools is
         // Scale output back if concentrated liquidity was applied
         if (effectiveReserveOut != reserveOut && effectiveReserveOut > 0) {
             amountOut = (amountOut * reserveOut) / effectiveReserveOut;
+        } else {
+            require(effectiveReserveOut > 0, "Zero effective reserve");
         }
     }
 

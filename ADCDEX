@@ -203,8 +203,10 @@ contract ADCDEX is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeable
         veADC veToken = veADC(governor.veADCToken());
         uint256 veBalance = veToken.balanceOf(msg.sender);
         require(veBalance > 0, "No veADC tokens");
+        // Cap iteration to prevent gas limit issues
+        uint256 maxTokens = veBalance > 50 ? 50 : veBalance;
         uint256 totalPower = 0;
-        for (uint256 i = 0; i < veBalance; ) {
+        for (uint256 i = 0; i < maxTokens; ) {
             uint256 tokenId = veToken.tokenOfOwnerByIndex(msg.sender, i);
             totalPower += veToken.getVotingPower(tokenId);
             unchecked { ++i; }
@@ -235,9 +237,10 @@ contract ADCDEX is Initializable, OwnableUpgradeable, ReentrancyGuardUpgradeable
         require(block.timestamp < proposals[proposalId].deadline, "Voting closed");
         require(!hasVoted[proposalId][msg.sender], "Already voted");
 
-        // Calculate actual voting power from all veADC positions
+        // Calculate actual voting power from all veADC positions (capped for gas safety)
         uint256 weight = 0;
-        for (uint256 i = 0; i < veBalance; ) {
+        uint256 maxTokens = veBalance > 50 ? 50 : veBalance;
+        for (uint256 i = 0; i < maxTokens; ) {
             uint256 tokenId = veToken.tokenOfOwnerByIndex(msg.sender, i);
             weight += veToken.getVotingPower(tokenId);
             unchecked { ++i; }

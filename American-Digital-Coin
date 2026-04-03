@@ -449,7 +449,8 @@ contract AmericanDigitalCurrency is Initializable, ReentrancyGuardUpgradeable, U
             // Cross-check with fallback if available
             if (address(fallbackPriceFeed) != address(0)) {
                 (bool fallbackOk, int256 fallbackPrice) = _tryGetOraclePrice(fallbackPriceFeed);
-                if (fallbackOk) {
+                if (fallbackOk && fallbackPrice > 0) {
+                    require(goldPrice > 0, "Invalid primary oracle price");
                     // Ensure prices don't deviate by more than MAX_ORACLE_DEVIATION
                     uint256 diff = goldPrice > fallbackPrice
                         ? uint256(goldPrice - fallbackPrice)
