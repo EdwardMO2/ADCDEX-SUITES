@@ -274,11 +274,18 @@ contract GlobalSettlementProtocol is
         _netPositions[msg.sender][counterparty][token] += amount;
         _netPositions[counterparty][msg.sender][token] -= amount;
 
-        // Bounds check: net position must not exceed available token balance
+        // Bounds check: net positions must not exceed available token balance
         int256 netPos = _netPositions[msg.sender][counterparty][token];
+        int256 counterpartyNetPos = _netPositions[counterparty][msg.sender][token];
+        uint256 contractBalance = IERC20Upgradeable(token).balanceOf(address(this));
+
+        // Positive position = counterparty owes us; verify contract can fulfil
         if (netPos > 0) {
-            uint256 contractBalance = IERC20Upgradeable(token).balanceOf(address(this));
             require(uint256(netPos) <= contractBalance, "Net position exceeds available balance");
+        }
+        // Negative counterparty position = they are owed; verify contract can fulfil
+        if (counterpartyNetPos > 0) {
+            require(uint256(counterpartyNetPos) <= contractBalance, "Counterparty net position exceeds available balance");
         }
 
         emit NetPositionUpdated(msg.sender, token, netPos);
