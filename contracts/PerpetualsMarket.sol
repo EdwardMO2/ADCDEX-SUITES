@@ -53,7 +53,7 @@ contract PerpetualsMarket is
     mapping(address => uint256) public fundingRates;
     /// @notice Simple on-chain price feed: token → price (scaled by PRECISION).
     mapping(address => uint256) public prices;
-    /// @notice Collateral token used for margin (e.g. USDC).
+    /// @notice Collateral token used for margin (e.g. a supported stablecoin).
     address public collateralToken;
     /// @notice Per-user nonce for unique position ID generation.
     mapping(address => uint256) private _positionNonces;
@@ -70,7 +70,7 @@ contract PerpetualsMarket is
     }
 
     /// @notice Initialise the contract.
-    /// @param _collateralToken Token accepted as collateral (e.g. USDC).
+    /// @param _collateralToken Token accepted as collateral (e.g. a supported stablecoin).
     /// @param _oracle          Reserved for future OracleManager integration.
     /// @param _owner           Initial contract owner.
     function initialize(
