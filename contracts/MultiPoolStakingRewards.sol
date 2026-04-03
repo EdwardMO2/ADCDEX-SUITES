@@ -4,10 +4,10 @@ pragma solidity ^0.8.20;
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import {IERC20Upgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
+import {SafeERC20Upgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC20/utils/SafeERC20Upgradeable.sol";
+import {IERC721Upgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC721/IERC721Upgradeable.sol";
 
 import {IMultiPoolStakingRewards} from "./Interfaces/IMultiPoolStakingRewards.sol";
 
@@ -36,9 +36,9 @@ contract MultiPoolStakingRewards is
     Initializable,
     UUPSUpgradeable,
     OwnableUpgradeable,
-    ReentrancyGuard
+    ReentrancyGuardUpgradeable
 {
-    using SafeERC20 for IERC20;
+    using SafeERC20Upgradeable for IERC20Upgradeable;
 
     // =========================================================================
     //                             CONSTANTS
@@ -64,11 +64,11 @@ contract MultiPoolStakingRewards is
     // =========================================================================
 
     /// @notice Token distributed as rewards across all pools (e.g. ADC).
-    IERC20 public rewardToken;
+    IERC20Upgradeable public rewardToken;
 
     /// @notice Optional ERC-721 contract whose token balance drives NFT boosts.
     ///         Set to `address(0)` to disable NFT boosts globally.
-    IERC721 public nftContract;
+    IERC721Upgradeable public nftContract;
 
     /// @notice Ordered list of all registered pools.
     PoolInfo[] public pools;
@@ -105,12 +105,13 @@ contract MultiPoolStakingRewards is
         require(_owner != address(0), "Invalid owner");
 
         __Ownable_init();
+        __ReentrancyGuard_init();
         _transferOwnership(_owner);
 
-        rewardToken = IERC20(_rewardToken);
+        rewardToken = IERC20Upgradeable(_rewardToken);
 
         if (_nftContract != address(0)) {
-            nftContract = IERC721(_nftContract);
+            nftContract = IERC721Upgradeable(_nftContract);
             emit NFTContractSet(_nftContract);
         }
 
@@ -229,7 +230,7 @@ contract MultiPoolStakingRewards is
             }
         }
 
-        IERC20(pool.stakeToken).safeTransferFrom(
+        IERC20Upgradeable(pool.stakeToken).safeTransferFrom(
             msg.sender,
             address(this),
             amount
@@ -287,7 +288,7 @@ contract MultiPoolStakingRewards is
             (userStake.amount * pool.accRewardPerShare) /
             PRECISION;
 
-        IERC20(pool.stakeToken).safeTransfer(msg.sender, amountOut);
+        IERC20Upgradeable(pool.stakeToken).safeTransfer(msg.sender, amountOut);
 
         emit Unstaked(msg.sender, poolId, amount, penalty);
     }
@@ -355,7 +356,7 @@ contract MultiPoolStakingRewards is
         userStake.rewardDebt = 0;
         userStake.depositTime = 0;
 
-        IERC20(pool.stakeToken).safeTransfer(msg.sender, amount);
+        IERC20Upgradeable(pool.stakeToken).safeTransfer(msg.sender, amount);
 
         emit EmergencyWithdraw(msg.sender, poolId, amount);
     }
@@ -369,7 +370,7 @@ contract MultiPoolStakingRewards is
     ///         Can only be called by the owner.
     /// @param _nftContract New ERC-721 contract address.
     function setNFTContract(address _nftContract) external onlyOwner {
-        nftContract = IERC721(_nftContract);
+        nftContract = IERC721Upgradeable(_nftContract);
         emit NFTContractSet(_nftContract);
     }
 
@@ -397,7 +398,7 @@ contract MultiPoolStakingRewards is
         require(amount > 0, "No penalties to collect");
 
         poolPenalties[poolId] = 0;
-        IERC20(pools[poolId].stakeToken).safeTransfer(recipient, amount);
+        IERC20Upgradeable(pools[poolId].stakeToken).safeTransfer(recipient, amount);
     }
 
     // =========================================================================
