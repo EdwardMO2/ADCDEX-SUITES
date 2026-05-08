@@ -7,7 +7,7 @@
     "@nomicfoundation/hardhat-network-helpers": "^3.0.7",
     "@nomicfoundation/hardhat-toolbox": "^7.0.0",
     "@nomicfoundation/hardhat-verify": "^3.0.16",
-    "@nomicfoundation/ignition-core": "^3.1.4",
+    "@nomicfoundation/ignition-core": "^3.1.5",
     "@typechain/ethers-v6": "^0.5.1",
     "@typechain/hardhat": "^9.1.0",
     "@types/chai": "^5.2.3",
