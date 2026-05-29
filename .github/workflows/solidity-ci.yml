@@ -42,7 +42,7 @@ jobs:
         with:
           node-version: '20'
       - name: Install dependencies
-        run: npm install
+        run: npm install --legacy-peer-deps
       - name: Install Solidity compiler
         run: |
           wget https://github.com/ethereum/solidity/releases/download/v${SOLC_VERSION}/solc-static-linux
@@ -96,7 +96,7 @@ jobs:
         run: |
           if [ -f "hardhat.config.js" ] || [ -f "hardhat.config.ts" ]; then
             echo "Hardhat config detected — compiling with Hardhat"
-            npm install
+            npm install --legacy-peer-deps
             npx hardhat compile
           else
             echo "No Hardhat config found — falling back to solc"
@@ -139,7 +139,7 @@ jobs:
         with:
           node-version: '20'
       - name: Install dependencies
-        run: npm install
+        run: npm install --legacy-peer-deps
       - name: Install Slither
         run: pip3 install slither-analyzer
       - name: Run Slither
