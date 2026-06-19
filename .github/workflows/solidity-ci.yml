@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     name: Branch Naming Check
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Validate branch naming convention
         if: github.event_name == 'pull_request'
         run: |
@@ -37,7 +37,7 @@ jobs:
     runs-on: ubuntu-latest
     name: Solidity Syntax Check
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
           node-version: '20'
@@ -70,7 +70,7 @@ jobs:
     runs-on: ubuntu-latest
     name: Solhint Linter
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
           node-version: '20'
@@ -83,7 +83,7 @@ jobs:
     runs-on: ubuntu-latest
     name: Contract Compilation
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
           node-version: '20'
@@ -134,7 +134,7 @@ jobs:
     runs-on: ubuntu-latest
     name: Slither Static Analysis
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
           node-version: '20'
